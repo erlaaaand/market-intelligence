@@ -1,25 +1,24 @@
 from __future__ import annotations
 
-# src/infrastructure/local_storage.py
-
 import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.core.entities import MarketAnalysisReport
+from src.core.entities import CreativeDocumentBatch
 from src.core.exceptions import StorageError
 from src.core.ports import StoragePort
 
 logger = logging.getLogger(__name__)
 
-class _ISODateTimeEncoder(json.JSONEncoder):
 
+class _ISODateTimeEncoder(json.JSONEncoder):
     def default(self, obj: Any) -> Any:
         if isinstance(obj, datetime):
             return obj.isoformat()
         return super().default(obj)
+
 
 class LocalStorageAdapter(StoragePort):
     def __init__(
@@ -37,10 +36,10 @@ class LocalStorageAdapter(StoragePort):
         logger.info("Raw data saved  → %s", target)
 
     def save_processed(
-        self, report: MarketAnalysisReport, filename: str
+        self, batch: CreativeDocumentBatch, filename: str
     ) -> None:
-        region = report.metadata.region     # e.g. "ID"
-        date_str = report.metadata.date     # e.g. "2026-04-19"
+        region = batch.region
+        date_str = batch.date
 
         dated_dir = self._processed_path / region / date_str
         try:
@@ -52,16 +51,14 @@ class LocalStorageAdapter(StoragePort):
             ) from exc
 
         target = dated_dir / filename
-        self._write_json(target, report.model_dump(mode="json"))
-        logger.info("Processed report saved  → %s", target)
+        self._write_json(target, batch.model_dump(mode="json"))
+        logger.info("Processed batch saved  → %s", target)
 
     @staticmethod
     def _today_utc() -> str:
-        """Return today's UTC date as ``YYYY-MM-DD``."""
         return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
 
     def _dated_dir(self, base: Path) -> Path:
-        """Return ``<base>/<YYYY-MM-DD>``, creating it if absent."""
         dated = base / self._today_utc()
         try:
             dated.mkdir(parents=True, exist_ok=True)
@@ -73,10 +70,7 @@ class LocalStorageAdapter(StoragePort):
         return dated
 
     def _ensure_base_directories(self) -> None:
-        """Create root base directories eagerly at construction time."""
-        bases = [self._raw_path, self._processed_path]
-
-        for directory in bases:
+        for directory in [self._raw_path, self._processed_path]:
             try:
                 directory.mkdir(parents=True, exist_ok=True)
                 logger.debug("Base directory ensured: %s", directory)

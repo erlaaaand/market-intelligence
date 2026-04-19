@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from src.core.entities import MarketAnalysisReport, RawTrendData, ReportMetadata
+from src.core.entities import CreativeDocumentBatch, RawTrendData
 from src.core.exceptions import DataExtractionError, LLMAnalysisError
 from src.core.ports import LLMPort, StoragePort, TrendProviderPort
 
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 _TOP_N_TOPICS: int = 10
 _RAW_FILENAME_TEMPLATE: str = "raw_{region}_{ts}.json"
-_PROCESSED_FILENAME_TEMPLATE: str = "market_data_{ts}.json"
+_PROCESSED_FILENAME_TEMPLATE: str = "creative_docs_{ts}.json"
 
 
 class TrendAnalyzerUseCase:
@@ -29,7 +29,7 @@ class TrendAnalyzerUseCase:
         self._llm = llm
         self._top_n = top_n
 
-    def execute(self, region: str) -> MarketAnalysisReport:
+    def execute(self, region: str) -> CreativeDocumentBatch:
         region = region.upper().strip()
         now: datetime = datetime.now(tz=timezone.utc)
         analysis_date: str = now.strftime("%Y-%m-%d")
@@ -57,24 +57,24 @@ class TrendAnalyzerUseCase:
             region,
         )
 
-        report = self._analyze_with_llm(top_raw, region, analysis_date)
+        batch = self._analyze_with_llm(top_raw, region, analysis_date)
 
-        if report.market_trends:
+        if batch.documents:
             processed_filename = _PROCESSED_FILENAME_TEMPLATE.format(ts=ts_str)
-            self._storage.save_processed(report, processed_filename)
+            self._storage.save_processed(batch, processed_filename)
             logger.info(
-                "Report saved  region='%s'  trends=%d  file='%s'",
+                "Batch saved  region='%s'  documents=%d  file='%s'",
                 region,
-                len(report.market_trends),
+                len(batch.documents),
                 processed_filename,
             )
 
         logger.info(
-            "Pipeline complete  region='%s'  trends=%d.",
+            "Pipeline complete  region='%s'  documents=%d.",
             region,
-            len(report.market_trends),
+            len(batch.documents),
         )
-        return report
+        return batch
 
     def _fetch_raw(self, region: str) -> list[RawTrendData]:
         try:
@@ -102,29 +102,26 @@ class TrendAnalyzerUseCase:
         raw_data: list[RawTrendData],
         region: str,
         analysis_date: str,
-    ) -> MarketAnalysisReport:
+    ) -> CreativeDocumentBatch:
         if not raw_data:
             logger.warning(
-                "No raw data available for region='%s'. Returning empty report.",
+                "No raw data available for region='%s'. Returning empty batch.",
                 region,
             )
-            return MarketAnalysisReport(
-                metadata=ReportMetadata(region=region, date=analysis_date),
-                market_trends=[],
-            )
+            return CreativeDocumentBatch(region=region, date=analysis_date)
 
         try:
-            report = self._llm.analyze_trends(
+            batch = self._llm.analyze_trends(
                 raw_data=raw_data,
                 region=region,
                 analysis_date=analysis_date,
             )
             logger.info(
-                "LLM analysis complete  region='%s'  trends=%d.",
+                "LLM analysis complete  region='%s'  documents=%d.",
                 region,
-                len(report.market_trends),
+                len(batch.documents),
             )
-            return report
+            return batch
         except LLMAnalysisError as exc:
             logger.error("LLM analysis failed for region='%s': %s", region, exc.message)
             raise

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from src.core.entities import MarketAnalysisReport, RawTrendData
+from src.core.entities import CreativeDocumentBatch, RawTrendData
 
 
 class TrendProviderPort(ABC):
@@ -18,7 +18,7 @@ class LLMPort(ABC):
         raw_data: list[RawTrendData],
         region: str,
         analysis_date: str,
-    ) -> MarketAnalysisReport:
+    ) -> CreativeDocumentBatch:
         ...
 
 
@@ -28,5 +28,5 @@ class StoragePort(ABC):
         ...
 
     @abstractmethod
-    def save_processed(self, report: MarketAnalysisReport, filename: str) -> None:
+    def save_processed(self, batch: CreativeDocumentBatch, filename: str) -> None:
         ...

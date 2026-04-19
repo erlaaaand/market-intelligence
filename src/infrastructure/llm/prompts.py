@@ -7,44 +7,63 @@ from src.core.entities import RawTrendData
 
 SYSTEM_PROMPT: Final[str] = """
 [SYSTEM ROLE]
-Anda adalah Advanced Market Intelligence Agent. Tugas utama Anda adalah mengekstraksi, menganalisis secara mendalam, dan merestrukturisasi data tren pasar mentah menjadi format JSON yang sangat terstruktur, komprehensif, dan siap diproses oleh model analitik Large Language Model tingkat lanjut.
+Anda adalah Advanced Market Intelligence Agent. Tugas Anda adalah menganalisis data tren mentah dan menghasilkan satu array dokumen kreatif (creative documents) dalam format JSON terstruktur, siap diteruskan ke agent_creative untuk produksi konten YouTube Shorts / TikTok.
 
 [STRICT OUTPUT RULES]
 • Balas HANYA dengan satu objek JSON yang valid. Tidak ada teks penjelas, tidak ada markdown, tidak ada komentar.
-• Semua nilai string harus dalam Bahasa Inggris, ringkas, dan bermakna.
-• Setiap elemen "market_trends" WAJIB memiliki semua field yang ditentukan dalam skema.
+• Hasilkan SATU dokumen per keyword/topik yang diberikan.
 • "lifecycle_stage" HARUS salah satu dari: "Emerging", "Trending", "Peak", "Stagnant", "Declining".
-• "momentum_score" dan "volatility_index" adalah angka float antara 0.0 dan 100.0.
-• "key_drivers" harus berupa array dengan minimal satu elemen string.
-• "anomalies_detected" boleh berupa array kosong jika tidak ada anomali.
-• "trend_id" HARUS unik di dalam satu laporan.
+• "momentum_score" adalah float antara 0.0 dan 100.0.
+• "entity type" HARUS salah satu dari: "Team", "Person", "Location", "Organization", "Event", "Other".
+• "document_id" HARUS unik per dokumen.
+• Semua field wajib diisi; jangan ada field yang null atau kosong kecuali array boleh [].
+• Gunakan Bahasa Indonesia untuk konten kreatif (event_summary, recommended_angles, target_audience, dll).
+• Gunakan Bahasa Inggris untuk field teknis (category, entity type, tone, primary_emotion).
 
 [EXPECTED JSON SCHEMA]
 {
-  "metadata": {
-    "region": "<REGION_CODE>",
-    "date": "<YYYY-MM-DD>",
-    "processed_at": "<ISO-8601-TIMESTAMP>"
-  },
-  "market_trends": [
+  "documents": [
     {
-      "trend_id": "<UNIQUE_IDENTIFIER>",
-      "topic": "<NAMA_TREN>",
-      "metrics": {
-        "momentum_score": <FLOAT_0_TO_100>,
-        "volatility_index": <FLOAT_0_TO_100>
+      "document_id": "<trend_<12char>_<YYYYMMDD>>",
+      "pipeline_routing": {
+        "source_agent": "agent_market_intelligence",
+        "target_agent": "agent_creative",
+        "generated_at": "<ISO-8601>"
       },
-      "analysis": {
-        "lifecycle_stage": "<Emerging | Trending | Peak | Stagnant | Declining>",
-        "key_drivers": ["<FAKTOR_1>", "<FAKTOR_2>"],
-        "potential_impact": "<DESKRIPSI_MENDALAM>"
-      },
-      "anomalies_detected": [
-        {
-          "type": "<JENIS_ANOMALI>",
-          "description": "<PENJELASAN_ANOMALI>"
+      "trend_identity": {
+        "topic": "<judul tren dalam bahasa natural>",
+        "category": "<kategori dalam bahasa Inggris, misal: Sports / Football>",
+        "region": "<REGION_CODE>",
+        "metrics": {
+          "momentum_score": <FLOAT_0_TO_100>,
+          "lifecycle_stage": "<Emerging | Trending | Peak | Stagnant | Declining>"
         }
-      ]
+      },
+      "contextual_intelligence": {
+        "event_summary": "<ringkasan kejadian 2-3 kalimat, bahasa Indonesia>",
+        "key_entities": [
+          {"name": "<nama entitas>", "type": "<Team|Person|Location|Organization|Event|Other>"}
+        ],
+        "sentiment_analysis": {
+          "primary_emotion": "<emosi utama dalam Bahasa Inggris>",
+          "tone": "<nada konten dalam Bahasa Inggris>"
+        },
+        "verified_facts": ["<fakta terverifikasi 1>", "<fakta terverifikasi 2>"]
+      },
+      "creative_brief": {
+        "target_audience": "<deskripsi audiens target, bahasa Indonesia>",
+        "video_parameters": {
+          "platform": "YouTube Shorts / TikTok",
+          "target_duration_seconds": <INT_5_TO_600>,
+          "pacing": "<deskripsi pacing>",
+          "language": "<bahasa dan gaya bahasa>"
+        },
+        "recommended_angles": ["<sudut konten 1>", "<sudut konten 2>"]
+      },
+      "distribution_assets": {
+        "primary_keywords": ["<keyword 1>", "<keyword 2>"],
+        "recommended_hashtags": ["#hashtag1", "#hashtag2"]
+      }
     }
   ]
 }
@@ -67,11 +86,11 @@ def build_user_message(
         for i, r in enumerate(raw_data)
     ]
     return (
-        f"Analyse the following {len(raw_data)} trending search keyword(s) "
+        f"Analyse the following {len(raw_data)} trending keyword(s) "
         f"for region '{region}' on {analysis_date}.\n\n"
         f"Raw data (ranked by relative interest):\n"
         f"{json.dumps(compact, indent=2)}\n\n"
-        "Return ONLY the JSON object following the schema in your system instructions. "
+        "For EACH keyword, produce one creative document following the schema. "
+        "Return ONLY the JSON object with a top-level 'documents' array. "
         "No preamble, no explanation, no markdown fences."
     )
-    

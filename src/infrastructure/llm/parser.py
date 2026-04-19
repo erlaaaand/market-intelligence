@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -8,9 +9,9 @@ from typing import Any
 from pydantic import ValidationError
 
 from src.core.entities import (
-    MarketAnalysisReport,
-    ReportMetadata,
-    TrendTopic,
+    CreativeDocument,
+    CreativeDocumentBatch,
+    PipelineRouting,
 )
 from src.core.exceptions import LLMAnalysisError
 
@@ -32,18 +33,35 @@ def extract_json_object(text: str) -> str:
     return text[start: end + 1]
 
 
+def _normalise_document(
+    doc: dict[str, Any],
+    region: str,
+    analysis_date: str,
+    generated_at: str,
+) -> dict[str, Any]:
+    """Inject / overwrite fields that must be controlled by the pipeline."""
+    # Pipeline routing is always set by us, not the LLM
+    doc["pipeline_routing"] = {
+        "source_agent": "agent_market_intelligence",
+        "target_agent": "agent_creative",
+        "generated_at": generated_at,
+    }
+    # Ensure region is always the one we passed in
+    doc.setdefault("trend_identity", {})
+    doc["trend_identity"]["region"] = region
+    return doc
+
+
 def parse_and_validate(
     content: str,
     model: str,
     region: str,
     analysis_date: str,
-) -> MarketAnalysisReport:
+) -> CreativeDocumentBatch:
     """
-    Parse raw LLM output and validate it against MarketAnalysisReport.
-    Falls back to per-item recovery when full validation fails.
+    Parse raw LLM output into a CreativeDocumentBatch.
+    Attempts full-batch validation first; falls back to per-document recovery.
     """
-    import json
-
     cleaned = strip_thinking_tags(content)
     json_str = extract_json_object(cleaned)
 
@@ -58,50 +76,56 @@ def parse_and_validate(
             ),
         ) from None
 
-    # Normalise metadata fields
-    raw_obj.setdefault("metadata", {})
-    raw_obj["metadata"]["region"] = region
-    raw_obj["metadata"]["date"] = analysis_date
-    raw_obj["metadata"].setdefault(
-        "processed_at",
-        datetime.now(tz=timezone.utc).isoformat(),
-    )
+    generated_at = datetime.now(tz=timezone.utc).isoformat()
+    raw_docs: list[Any] = raw_obj.get("documents", [])
 
-    # Attempt full validation first
+    # Normalise each document before validation
+    normalised = [
+        _normalise_document(doc, region, analysis_date, generated_at)
+        for doc in raw_docs
+        if isinstance(doc, dict)
+    ]
+
+    # Attempt full-batch validation
+    batch_payload = {
+        "region": region,
+        "date": analysis_date,
+        "documents": normalised,
+    }
     try:
-        return MarketAnalysisReport.model_validate(raw_obj)
+        return CreativeDocumentBatch.model_validate(batch_payload)
     except ValidationError as full_err:
         logger.warning(
-            "Full MarketAnalysisReport validation failed (%d error(s)). "
-            "Attempting per-item recovery.",
+            "Full CreativeDocumentBatch validation failed (%d error(s)). "
+            "Attempting per-document recovery.",
             full_err.error_count(),
         )
 
-    # Per-item recovery
-    valid_trends: list[TrendTopic] = []
-    for item in raw_obj.get("market_trends", []):
-        if not isinstance(item, dict):
-            continue
+    # Per-document recovery
+    valid_docs: list[CreativeDocument] = []
+    for doc in normalised:
         try:
-            valid_trends.append(TrendTopic.model_validate(item))
-        except ValidationError as item_err:
+            valid_docs.append(CreativeDocument.model_validate(doc))
+        except ValidationError as doc_err:
+            topic = (doc.get("trend_identity") or {}).get("topic", "<unknown>")
             logger.warning(
-                "Dropping invalid trend item (topic=%r): %d error(s).",
-                item.get("topic", "<unknown>"),
-                item_err.error_count(),
+                "Dropping invalid document (topic=%r): %d error(s).",
+                topic,
+                doc_err.error_count(),
             )
 
-    if not valid_trends:
+    if not valid_docs:
         raise LLMAnalysisError(
             model=model,
             reason=(
-                "LLM output failed validation and no individual trends "
+                "LLM output failed validation and no individual documents "
                 "could be recovered."
             ),
         )
 
-    logger.info("Partial recovery: %d valid trend(s) salvaged.", len(valid_trends))
-    return MarketAnalysisReport(
-        metadata=ReportMetadata(region=region, date=analysis_date),
-        market_trends=valid_trends,
+    logger.info("Partial recovery: %d valid document(s) salvaged.", len(valid_docs))
+    return CreativeDocumentBatch(
+        region=region,
+        date=analysis_date,
+        documents=valid_docs,
     )
