@@ -70,3 +70,57 @@ class StorageError(AgentMarketIntelligenceError):
         self.path = path
         self.reason = reason
         super().__init__(f"Storage operation failed at '{path}': {reason}")
+
+
+# ---------------------------------------------------------------------------
+# Content Brief Generator — domain exceptions
+# ---------------------------------------------------------------------------
+
+
+class TrendFileNotFoundError(AgentMarketIntelligenceError):
+    """
+    Raised when no processable trend files exist at the expected location.
+
+    This typically means the upstream TrendAnalyzerUseCase has not been run yet,
+    or the configured PROCESSED_DATA_PATH directory is empty / missing.
+
+    Attributes:
+        path:   Directory or file path that was searched.
+        reason: Actionable description of the failure.
+    """
+
+    def __init__(self, path: str, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"No trend file found at '{path}': {reason}")
+
+
+class TrendFileParseError(AgentMarketIntelligenceError):
+    """
+    Raised when a processed trend JSON file cannot be deserialised into
+    valid TrendTopic domain entities.
+
+    Attributes:
+        path:   Absolute path of the file that failed to parse.
+        reason: Description of the parse or validation failure.
+    """
+
+    def __init__(self, path: str, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"Failed to parse trend file at '{path}': {reason}")
+
+
+class BriefGenerationError(AgentMarketIntelligenceError):
+    """
+    Raised when a ContentBrief cannot be constructed for a given TrendTopic.
+
+    Attributes:
+        topic:  The keyword or topic name that triggered the failure.
+        reason: Description of the generation failure.
+    """
+
+    def __init__(self, topic: str, reason: str) -> None:
+        self.topic = topic
+        self.reason = reason
+        super().__init__(f"Failed to generate brief for topic '{topic}': {reason}")

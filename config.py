@@ -62,6 +62,15 @@ class Settings(BaseSettings):
         default="data/processed",
         description="Filesystem directory for processed JSON output files.",
     )
+    BRIEFS_DATA_PATH: str = Field(
+        default="data/briefs",
+        description=(
+            "Filesystem directory for generated content brief JSON files. "
+            "The Content Brief Generator writes individual brief files to "
+            "<BRIEFS_DATA_PATH>/individual/ and batch summary files directly "
+            "under <BRIEFS_DATA_PATH>/."
+        ),
+    )
 
     # ── pytrends tunables ─────────────────────────────────────────────
     PYTRENDS_HL: str = Field(
