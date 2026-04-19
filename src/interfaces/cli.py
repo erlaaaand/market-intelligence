@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+"""
+CLI interface — powered by `rich` for polished, production-grade terminal UX.
+
+Key improvements over the previous ANSI/threading implementation:
+  - `rich.console` handles color/no-color detection automatically (CI, pipes, etc.)
+  - `rich.progress` spinner replaces the hand-rolled threading spinner
+  - `rich.table` produces a professional results table
+  - `rich.panel` / `rich.text` give clean error formatting
+  - Zero manual ANSI escape codes — everything is theme-consistent
+"""
+
 import argparse
 import logging
 import sys
-import threading
-import time
-import itertools
+from typing import Final
+
+from rich import box
+from rich.columns import Columns
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.table import Table
+from rich.text import Text
+from rich.theme import Theme
 
 from src.application.trend_analyzer import TrendAnalyzerUseCase
 from src.core.entities import TrendTopic
@@ -18,7 +36,40 @@ from src.core.exceptions import (
 
 logger = logging.getLogger(__name__)
 
-_REGIONS: dict[str, str] = {
+# ---------------------------------------------------------------------------
+# Console setup
+# ---------------------------------------------------------------------------
+
+_THEME = Theme(
+    {
+        "header": "bold bright_cyan",
+        "subheader": "dim white",
+        "region": "bold yellow",
+        "rank": "bold cyan",
+        "topic": "bold white",
+        "volume_high": "bold red",
+        "volume_mid": "bold yellow",
+        "volume_low": "cyan",
+        "growing": "bold green",
+        "stable": "yellow",
+        "angle": "magenta",
+        "success": "bold green",
+        "error": "bold red",
+        "warning": "yellow",
+        "hint": "dim white",
+        "divider": "dim blue",
+        "number": "bold bright_blue",
+        "prompt": "bold cyan",
+    }
+)
+
+console = Console(theme=_THEME, highlight=False)
+
+# ---------------------------------------------------------------------------
+# Region registry
+# ---------------------------------------------------------------------------
+
+_REGIONS: Final[dict[str, str]] = {
     "US": "United States",
     "ID": "Indonesia",
     "GB": "United Kingdom",
@@ -34,160 +85,129 @@ _REGIONS: dict[str, str] = {
     "KR": "South Korea",
     "BR": "Brazil",
     "MX": "Mexico",
+    "TH": "Thailand",
+    "VN": "Vietnam",
+    "SA": "Saudi Arabia",
+    "ZA": "South Africa",
+    "IT": "Italy",
 }
 
-_DIVIDER_OUTER = "═" * 64
-_DIVIDER_INNER = "─" * 64
-
-
-class _Ansi:
-    RESET   = "\033[0m"
-    BOLD    = "\033[1m"
-    DIM     = "\033[2m"
-    RED     = "\033[91m"
-    GREEN   = "\033[92m"
-    YELLOW  = "\033[93m"
-    BLUE    = "\033[94m"
-    MAGENTA = "\033[95m"
-    CYAN    = "\033[96m"
-    WHITE   = "\033[97m"
-    GRAY    = "\033[90m"
-    BG_BLUE = "\033[44m"
-
-    @staticmethod
-    def supports() -> bool:
-        return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
-
-    @classmethod
-    def c(cls, text: str, *codes: str) -> str:
-        if not cls.supports():
-            return text
-        return "".join(codes) + text + cls.RESET
-
-
-C = _Ansi()
-
-
-class _Spinner:
-    _FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-    def __init__(self, message: str) -> None:
-        self._message = message
-        self._stop_event = threading.Event()
-        self._thread = threading.Thread(target=self._spin, daemon=True)
-
-    def _spin(self) -> None:
-        for frame in itertools.cycle(self._FRAMES):
-            if self._stop_event.is_set():
-                break
-            sys.stdout.write(
-                f"\r  {C.c(frame, C.CYAN, C.BOLD)}  {C.c(self._message, C.WHITE)}   "
-            )
-            sys.stdout.flush()
-            time.sleep(0.08)
-
-    def __enter__(self) -> "_Spinner":
-        if C.supports():
-            self._thread.start()
-        else:
-            print(f"  ... {self._message}")
-        return self
-
-    def __exit__(self, *_) -> None:
-        self._stop_event.set()
-        if C.supports() and self._thread.is_alive():
-            self._thread.join(timeout=0.5)
-        if C.supports():
-            sys.stdout.write("\r" + " " * 72 + "\r")
-            sys.stdout.flush()
+# ---------------------------------------------------------------------------
+# Region selector
+# ---------------------------------------------------------------------------
 
 
 def _select_region_interactive() -> str:
+    """Display an interactive region picker and return the chosen ISO code."""
     region_list = list(_REGIONS.items())
 
-    print()
-    print(C.c(_DIVIDER_OUTER, C.BLUE))
-    print(C.c("  ✦  PILIH REGION TARGET", C.BOLD, C.WHITE))
-    print(C.c(_DIVIDER_INNER, C.GRAY))
-    print()
-
-    cols = 3
-    for i, (code, name) in enumerate(region_list):
-        num_badge = C.c(f"  [{i + 1:>2}]", C.CYAN, C.BOLD)
-        code_str  = C.c(f" {code}", C.YELLOW, C.BOLD)
-        name_str  = C.c(f" {name}", C.WHITE)
-        end       = "\n" if (i + 1) % cols == 0 or (i + 1) == len(region_list) else ""
-        print(f"{num_badge}{code_str} {name_str:<22}", end=end)
-
-    print()
-    print(C.c(_DIVIDER_INNER, C.GRAY))
-    print(
-        C.c("  Ketik ", C.GRAY)
-        + C.c("nomor", C.CYAN, C.BOLD)
-        + C.c(" (1-", C.GRAY)
-        + C.c(str(len(region_list)), C.CYAN)
-        + C.c(") atau ", C.GRAY)
-        + C.c("kode ISO", C.YELLOW, C.BOLD)
-        + C.c(" langsung (contoh: ID, US, SG)", C.GRAY)
+    console.print()
+    console.print(
+        Panel.fit(
+            "[header]✦  SELECT TARGET REGION[/header]",
+            border_style="blue",
+            padding=(0, 2),
+        )
     )
-    print()
+    console.print()
+
+    # Build a 3-column table of regions
+    tbl = Table(
+        show_header=False,
+        box=None,
+        padding=(0, 2),
+        expand=False,
+    )
+    tbl.add_column(justify="right", style="number", no_wrap=True)
+    tbl.add_column(style="region", no_wrap=True)
+    tbl.add_column(style="subheader")
+
+    for i, (code, name) in enumerate(region_list, start=1):
+        tbl.add_row(f"[{i}]", code, name)
+
+    # Split into 3 visual columns
+    rows = region_list
+    col_size = (len(rows) + 2) // 3
+    cols_data: list[Table] = []
+    for c in range(3):
+        sub = Table(show_header=False, box=None, padding=(0, 2))
+        sub.add_column(justify="right", style="number", no_wrap=True)
+        sub.add_column(style="region", no_wrap=True)
+        sub.add_column(style="subheader")
+        for i in range(c * col_size, min((c + 1) * col_size, len(rows))):
+            sub.add_row(f"[{i + 1}]", rows[i][0], rows[i][1])
+        cols_data.append(sub)
+
+    console.print(Columns(cols_data))
+    console.print()
+    console.print(
+        "[hint]Enter a [prompt]number[/prompt] (1–{n}) "
+        "or a [prompt]2-letter ISO code[/prompt] directly (e.g. ID, US, SG)[/hint]".format(
+            n=len(region_list)
+        )
+    )
+    console.print()
 
     while True:
         try:
-            raw = input(C.c("  > ", C.CYAN, C.BOLD)).strip()
+            raw = console.input("[prompt]  > [/prompt]").strip()
         except (KeyboardInterrupt, EOFError):
-            print()
-            print(C.c("\n  Dibatalkan oleh user.", C.YELLOW))
+            console.print()
+            console.print("[warning]  Cancelled by user.[/warning]")
             sys.exit(0)
 
         if not raw:
-            print(C.c("  Input tidak boleh kosong. Coba lagi.", C.RED))
+            console.print("[error]  Input cannot be empty. Try again.[/error]")
             continue
 
         if raw.isdigit():
             idx = int(raw) - 1
             if 0 <= idx < len(region_list):
                 code, name = region_list[idx]
-                print(
-                    C.c(f"\n  Region dipilih: ", C.GRAY)
-                    + C.c(f"{name} ({code})", C.GREEN, C.BOLD)
-                    + "\n"
+                console.print(
+                    f"\n  Region selected: [region]{name}[/region] "
+                    f"[subheader]({code})[/subheader]\n"
                 )
                 return code
-            else:
-                print(C.c(f"  Nomor tidak valid. Masukkan 1-{len(region_list)}.", C.RED))
-                continue
+            console.print(f"[error]  Number out of range. Enter 1–{len(region_list)}.[/error]")
+            continue
 
         upper = raw.upper()
         if upper in _REGIONS:
-            name = _REGIONS[upper]
-            print(
-                C.c(f"\n  Region dipilih: ", C.GRAY)
-                + C.c(f"{name} ({upper})", C.GREEN, C.BOLD)
-                + "\n"
+            console.print(
+                f"\n  Region selected: [region]{_REGIONS[upper]}[/region] "
+                f"[subheader]({upper})[/subheader]\n"
             )
             return upper
 
         if len(upper) == 2 and upper.isalpha():
-            confirm = input(
-                C.c(f"  Kode '{upper}' tidak ada di daftar. Tetap gunakan? [y/N]: ", C.YELLOW)
+            confirm = console.input(
+                f"[warning]  '{upper}' is not in the preset list. Use it anyway? [[y/N]]: [/warning]"
             ).strip().lower()
             if confirm in ("y", "yes"):
                 return upper
             continue
 
-        print(C.c("  Input tidak dikenali. Masukkan nomor atau kode ISO 2 huruf.", C.RED))
+        console.print("[error]  Unrecognised input. Enter a number or a 2-letter ISO code.[/error]")
+
+
+# ---------------------------------------------------------------------------
+# CLI runner
+# ---------------------------------------------------------------------------
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent_market_intelligence",
-        description="Fetch, filter, and persist trending market topics for YouTube Shorts research.",
+        description=(
+            "Fetch, filter, and persist trending market topics "
+            "for YouTube Shorts content research."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
             "  python main.py               # interactive region selector\n"
-            "  python main.py --region US   # skip selector, langsung US\n"
+            "  python main.py --region US   # skip selector, use US\n"
             "  python main.py --region ID\n"
         ),
     )
@@ -196,7 +216,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         metavar="CC",
-        help="ISO 3166-1 alpha-2 code (e.g. US, ID). Jika tidak disertakan, akan muncul selector interaktif.",
+        help=(
+            "ISO 3166-1 alpha-2 code (e.g. US, ID). "
+            "If omitted, the interactive selector is shown."
+        ),
     )
     return parser
 
@@ -207,132 +230,195 @@ def run_cli(use_case: TrendAnalyzerUseCase, default_region: str) -> None:
 
     _print_header()
 
+    # Resolve region
     if args.region:
         region = args.region.upper().strip()
         if len(region) != 2 or not region.isalpha():
-            parser.error(
-                f"Invalid region code '{region}'. Expected 2-letter ISO code."
-            )
+            parser.error(f"Invalid region code '{region}'. Expected 2-letter ISO code.")
     else:
         region = _select_region_interactive()
 
     logger.info("CLI: starting pipeline for region='%s'.", region)
 
+    # Run pipeline with a rich spinner
     results: list[TrendTopic] = []
+    region_label = _REGIONS.get(region, "Custom Region")
+
     try:
-        spinner_msg = (
-            f"Mengambil trend untuk "
-            + C.c(region, C.CYAN, C.BOLD)
-            + C.c(f" ({_REGIONS.get(region, 'Custom Region')})", C.GRAY)
-            + C.c(" ...", C.WHITE)
-        )
-        with _Spinner(spinner_msg):
+        with Progress(
+            SpinnerColumn(spinner_name="dots", style="cyan"),
+            TextColumn(
+                f"[white]Fetching trends for [/white][region]{region_label}[/region] "
+                f"[subheader]({region})[/subheader][white] …[/white]"
+            ),
+            TimeElapsedColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("", total=None)
             results = use_case.execute(region=region)
+            progress.stop_task(task)
 
     except RateLimitExceededError as exc:
-        _clear_line()
         _exit_error(
-            "Rate Limit Exceeded", exc.message,
-            hint="Tunggu beberapa menit lalu coba lagi, atau gunakan VPN.",
+            title="Rate Limit Exceeded",
+            detail=exc.message,
+            hint="Wait a few minutes and try again, or use a VPN/proxy.",
             code=2,
         )
     except DataExtractionError as exc:
-        _clear_line()
         _exit_error(
-            "Data Extraction Failed", exc.message,
-            hint="Cek koneksi internet dan pastikan region code didukung.",
+            title="Data Extraction Failed",
+            detail=exc.message,
+            hint="Check your internet connection and verify the region code is supported.",
             code=3,
         )
     except StorageError as exc:
-        _clear_line()
         _exit_error(
-            "Storage Failure", exc.message,
-            hint="Pastikan folder data/ bisa ditulis dan disk masih punya ruang.",
+            title="Storage Failure",
+            detail=exc.message,
+            hint="Ensure data/ is writable and you have sufficient disk space.",
             code=4,
         )
     except AgentMarketIntelligenceError as exc:
-        _clear_line()
-        _exit_error("Unexpected Error", exc.message, code=5)
+        _exit_error(title="Unexpected Error", detail=exc.message, code=5)
+    except KeyboardInterrupt:
+        console.print()
+        console.print("[warning]  Interrupted by user.[/warning]")
+        sys.exit(0)
 
     _print_results(results, region)
 
 
+# ---------------------------------------------------------------------------
+# Header
+# ---------------------------------------------------------------------------
+
+
 def _print_header() -> None:
-    print()
-    print(C.c(_DIVIDER_OUTER, C.BLUE))
-    print(C.c("  ✦  Market Intelligence", C.BOLD, C.WHITE) + "  " + C.c("by agent_market_intelligence", C.GRAY))
-    print(C.c("     YouTube Shorts Trend Analyzer", C.GRAY))
-    print(C.c(_DIVIDER_OUTER, C.BLUE))
+    title = Text()
+    title.append("✦  Market Intelligence", style="header")
+    title.append("   by agent_market_intelligence", style="subheader")
+
+    subtitle = Text("YouTube Shorts Trend Analyzer", style="subheader")
+
+    console.print()
+    console.print(
+        Panel(
+            f"{title}\n{subtitle}",
+            border_style="blue",
+            padding=(0, 2),
+        )
+    )
 
 
-def _clear_line() -> None:
-    if C.supports():
-        sys.stdout.write("\r" + " " * 72 + "\r")
-        sys.stdout.flush()
+# ---------------------------------------------------------------------------
+# Results table
+# ---------------------------------------------------------------------------
 
 
 def _print_results(topics: list[TrendTopic], region: str) -> None:
     region_name = _REGIONS.get(region, region)
 
     if not topics:
-        print()
-        print(C.c("  ⚠  Tidak ada trend yang ditemukan", C.YELLOW, C.BOLD) + C.c(f" untuk region '{region}'.", C.YELLOW))
-        print(C.c("     Coba region lain atau periksa koneksi internet.", C.GRAY))
-        print()
+        console.print()
+        console.print(
+            Panel(
+                f"[warning]⚠  No trends found for region '{region}'.[/warning]\n"
+                "[hint]Try a different region or check your internet connection.[/hint]",
+                border_style="yellow",
+                title="[warning]No Results[/warning]",
+                padding=(0, 2),
+            )
+        )
+        console.print()
         return
 
-    print(C.c(_DIVIDER_OUTER, C.BLUE))
-    print(
-        C.c("  ✦  TREND REPORT", C.BOLD, C.WHITE)
-        + "  "
-        + C.c(f"{region_name} ({region})", C.CYAN, C.BOLD)
-        + "  "
-        + C.c(f"· {len(topics)} topik ditemukan", C.GREEN)
+    # Build results table
+    tbl = Table(
+        title=(
+            f"[header]Trend Report[/header]  "
+            f"[region]{region_name} ({region})[/region]  "
+            f"[subheader]· {len(topics)} topics found[/subheader]"
+        ),
+        box=box.ROUNDED,
+        border_style="blue",
+        header_style="bold cyan",
+        show_lines=True,
+        expand=True,
+        padding=(0, 1),
     )
-    print(C.c(_DIVIDER_OUTER, C.BLUE))
+
+    tbl.add_column("#", style="rank", justify="right", width=3, no_wrap=True)
+    tbl.add_column("Topic", style="topic", min_width=20)
+    tbl.add_column("Volume", justify="center", width=12)
+    tbl.add_column("Status", justify="center", width=11)
+    tbl.add_column("Content Angle", style="angle", min_width=30)
 
     for idx, topic in enumerate(topics, start=1):
-        _print_topic_card(idx, topic)
+        volume_bar = _volume_bar(topic.search_volume)
+        volume_style = (
+            "volume_high" if topic.search_volume >= 80
+            else "volume_mid" if topic.search_volume >= 60
+            else "volume_low"
+        )
+        volume_cell = Text()
+        volume_cell.append(f"{topic.search_volume:>3}/100", style=volume_style)
+        volume_cell.append(f"\n{volume_bar}")
 
-    print(C.c(_DIVIDER_OUTER, C.BLUE))
-    print(C.c(f"  ✓  {len(topics)} topik disimpan ke data/processed/", C.GREEN, C.BOLD))
-    print(C.c(_DIVIDER_OUTER, C.BLUE))
-    print()
+        status = (
+            Text("↑ Growing", style="growing")
+            if topic.is_growing
+            else Text("→ Stable", style="stable")
+        )
 
+        tbl.add_row(
+            str(idx),
+            topic.topic_name,
+            volume_cell,
+            status,
+            topic.suggested_angle,
+        )
 
-def _print_topic_card(idx: int, topic: TrendTopic) -> None:
-    growth_icon = (
-        C.c("↑ Growing", C.GREEN, C.BOLD) if topic.is_growing
-        else C.c("→ Stable", C.YELLOW)
+    console.print()
+    console.print(tbl)
+    console.print()
+    console.print(
+        f"  [success]✓  {len(topics)} topic(s) saved to data/processed/[/success]"
     )
-    volume_bar  = _volume_bar(topic.search_volume)
-    volume_num  = C.c(f"{topic.search_volume:>3}/100", C.WHITE, C.BOLD)
-    rank_badge  = C.c(f"  {idx:>2}.", C.CYAN, C.BOLD)
-    name        = C.c(topic.topic_name, C.WHITE, C.BOLD)
-    angle_label = C.c("       Angle  :", C.GRAY)
-    angle_text  = C.c(topic.suggested_angle, C.MAGENTA)
-    divider     = C.c("  " + _DIVIDER_INNER, C.GRAY)
-
-    print()
-    print(f"{rank_badge}  {name}")
-    print(f"       Volume : {volume_num}  {volume_bar}  {growth_icon}")
-    print(f"{angle_label} {angle_text}")
-    print(divider)
+    console.print()
 
 
-def _volume_bar(volume: int, width: int = 20) -> str:
+def _volume_bar(volume: int, width: int = 10) -> str:
+    """Return a simple unicode progress bar string."""
     filled = round(volume / 100 * width)
-    empty  = width - filled
-    color  = C.RED if volume >= 80 else (C.YELLOW if volume >= 60 else C.CYAN)
-    return "[" + C.c("█" * filled, color) + C.c("░" * empty, C.GRAY) + "]"
+    empty = width - filled
+    return "█" * filled + "░" * empty
 
 
-def _exit_error(label: str, detail: str, hint: str = "", code: int = 1) -> None:
-    logger.error("%s: %s", label, detail)
-    print()
-    print(C.c(f"  ✗  {label}", C.RED, C.BOLD))
-    print(C.c(f"     {detail}", C.WHITE))
+# ---------------------------------------------------------------------------
+# Error display
+# ---------------------------------------------------------------------------
+
+
+def _exit_error(
+    title: str,
+    detail: str,
+    hint: str = "",
+    code: int = 1,
+) -> None:
+    logger.error("%s: %s", title, detail)
+    body = f"[error]{detail}[/error]"
     if hint:
-        print(C.c(f"     💡 {hint}", C.GRAY))
-    print()
+        body += f"\n\n[hint]💡 {hint}[/hint]"
+    console.print()
+    console.print(
+        Panel(
+            body,
+            title=f"[error]✗  {title}[/error]",
+            border_style="red",
+            padding=(0, 2),
+        )
+    )
+    console.print()
     sys.exit(code)

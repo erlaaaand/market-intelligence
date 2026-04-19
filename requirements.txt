@@ -1,10 +1,18 @@
 # ── Core dependencies ──────────────────────────────────────────────────────
 pydantic>=2.7,<3.0
 pydantic-settings>=2.3,<3.0
+
+# ── Trend scraping ─────────────────────────────────────────────────────────
+# pytrends: used for Tier 1 trending_searches() — manages NID cookie session.
 pytrends>=4.9.2,<5.0
 
-# ── HTTP / networking (pinned transitively by pytrends) ───────────────────
-requests>=2.31,<3.0
+# ── HTTP client ────────────────────────────────────────────────────────────
+# httpx: used for Tier 2 (RSS) and Tier 3 (interest_over_time) direct calls.
+# [http2] extra adds h2 for HTTP/2 support (reduces fingerprinting surface).
+httpx[http2]>=0.27,<1.0
+
+# ── CLI / terminal output ──────────────────────────────────────────────────
+rich>=13.7,<15.0
 
 # ── Development & testing ─────────────────────────────────────────────────
 pytest>=8.2,<9.0
