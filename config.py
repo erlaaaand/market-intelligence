@@ -1,21 +1,5 @@
 # config.py
 
-"""
-Application configuration via environment variables and `.env` file.
-
-Uses `pydantic-settings` v2 so every value is strictly typed, validated at
-startup, and overridable by environment variable (which takes priority over
-the .env file).
-
-Usage:
-    from config import get_settings
-    settings = get_settings()
-    print(settings.OLLAMA_MODEL)
-
-Testing:
-    from config import get_settings
-    get_settings.cache_clear()   # force re-read between test cases
-"""
 from __future__ import annotations
 
 from functools import lru_cache
@@ -25,15 +9,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """
-    Centralised, validated application settings.
-
-    Precedence (highest → lowest):
-        1. Actual environment variables.
-        2. Values in the `.env` file at the project root.
-        3. Field defaults defined here.
-    """
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -61,11 +36,7 @@ class Settings(BaseSettings):
         description="Root directory for processed market-analysis reports. "
                     "Actual files land under <PROCESSED_DATA_PATH>/<REGION>/<DATE>/.",
     )
-    BRIEFS_DATA_PATH: str = Field(
-        default="data/briefs",
-        description="Filesystem directory for generated content brief JSON files.",
-    )
-
+    
     # ── pytrends tunables ─────────────────────────────────────────────
     PYTRENDS_HL: str = Field(
         default="en-US",
@@ -167,10 +138,4 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """
-    Return a cached singleton ``Settings`` instance.
-
-    The ``lru_cache`` ensures ``.env`` is parsed exactly once per process.
-    Call ``get_settings.cache_clear()`` in tests to force re-loading.
-    """
     return Settings()

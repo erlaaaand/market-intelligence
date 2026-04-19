@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+import sys
 import argparse
 import logging
 import sys
 from datetime import datetime, timezone
 from typing import Final, Literal
 
+# --- Tambahan untuk Hardware Monitoring ---
+try:
+    import psutil
+except ImportError:
+    psutil = None
+# ------------------------------------------
+
+import time
+import threading
+
 from rich import box
 from rich.columns import Columns
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, ProgressColumn
 from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
@@ -93,6 +104,81 @@ _LIFECYCLE_STYLES: Final[dict[str, str]] = {
 }
 
 
+class HardwareMonitorColumn(ProgressColumn):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._last_temp_str = "  🌡️  [dim white]Temp:[/dim white] [dim]N/A[/dim]"
+        self._last_temp_update = 0
+        
+        self._wmi = None
+        self._wmi_thread_id = None # <-- Menyimpan ID dari Thread saat ini
+
+    def render(self, task) -> Text:
+        if psutil is None:
+            return Text(" [psutil missing]", style="dim red")
+        
+        cpu = psutil.cpu_percent()
+        ram = psutil.virtual_memory().percent
+        
+        cpu_color = "red" if cpu > 85 else "cyan"
+        ram_color = "red" if ram > 85 else "cyan"
+        
+        current_time = time.time()
+        
+        # Throttling: Baca suhu maksimal 1 detik sekali
+        if current_time - self._last_temp_update > 1.0:
+            if sys.platform == "win32":
+                try:
+                    import wmi
+                    import pythoncom
+                    
+                    # 1. Daftarkan Thread yang AKTIF SAAT INI ke sistem Windows COM
+                    pythoncom.CoInitialize()
+                    
+                    current_thread_id = threading.get_ident()
+                    
+                    # 2. Jika rich.Progress berpindah Thread (misal: Main -> Background),
+                    # kita buang WMI lama dan buat koneksi WMI baru untuk Thread yang baru ini.
+                    if self._wmi_thread_id != current_thread_id:
+                        self._wmi = wmi.WMI(namespace="root\\wmi")
+                        self._wmi_thread_id = current_thread_id
+                        
+                    # 3. Eksekusi baca suhu dengan aman di Thread yang benar
+                    if self._wmi:
+                        temperature_info = self._wmi.MSAcpi_ThermalZoneTemperature()
+                        if temperature_info:
+                            cpu_temp = (temperature_info[0].CurrentTemperature / 10.0) - 273.15
+                            temp_color = "red" if cpu_temp > 80 else "cyan"
+                            self._last_temp_str = f"  🌡️  [dim white]Temp:[/dim white] [{temp_color}]{cpu_temp:.0f}°C[/{temp_color}]"
+                
+                except ImportError:
+                    self._last_temp_str = "  🌡️  [dim white]Temp:[/dim white] [dim red]lib missing[/dim red]"
+                except Exception as e:
+                    self._last_temp_str = "  🌡️  [dim white]Temp:[/dim white] [dim red]Err (COM)[/dim red]"
+            else:
+                # Logika Linux/Mac tetap sama
+                if hasattr(psutil, "sensors_temperatures"):
+                    temps = psutil.sensors_temperatures()
+                    if temps:
+                        try:
+                            sensor_list = (
+                                temps.get("coretemp") or temps.get("k10temp") or 
+                                temps.get("zenpower") or temps.get("acpitz") or list(temps.values())[0]
+                            )
+                            if sensor_list:
+                                cpu_temp = sensor_list[0].current
+                                temp_color = "red" if cpu_temp > 80 else "cyan"
+                                self._last_temp_str = f"  🌡️  [dim white]Temp:[/dim white] [{temp_color}]{cpu_temp:.0f}°C[/{temp_color}]"
+                        except Exception:
+                            pass
+                            
+            self._last_temp_update = current_time
+
+        return Text.from_markup(
+            f"  🖥️  [dim white]CPU:[/dim white] [{cpu_color}]{cpu:04.1f}%[/{cpu_color}]  "
+            f"[dim white]RAM:[/dim white] [{ram_color}]{ram:04.1f}%[/{ram_color}]{self._last_temp_str}"
+        )
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent_market_intelligence",
@@ -166,6 +252,7 @@ def _run_pipeline(
                 f"[subheader]({region})[/subheader][white] …[/white]"
             ),
             TimeElapsedColumn(),
+            HardwareMonitorColumn(), # <-- HARDWARE MONITOR DIPASANG DI SINI
             console=console,
             transient=True,
         ) as progress:

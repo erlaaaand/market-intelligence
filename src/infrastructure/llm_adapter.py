@@ -161,7 +161,7 @@ class OllamaLLMAdapter(LLMPort):
 
         raise LLMAnalysisError(
             model=self._model,
-            reason=f"All {self._retries} attempts failed. Last error: {last_exc}",
+            reason=f"All {self._retries} attempts failed. The model did not respond in time.",
         )
 
     def _call_ollama(self, url: str, user_message: str) -> str:
@@ -171,7 +171,7 @@ class OllamaLLMAdapter(LLMPort):
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
             ],
-            "stream": False,
+            "stream": True,
             "format": "json",
             "options": {
                 "temperature": 0.1,
@@ -179,47 +179,59 @@ class OllamaLLMAdapter(LLMPort):
             },
         }
 
-        try:
-            with httpx.Client(timeout=self._timeout) as client:
-                resp = client.post(url, json=payload)
-        except httpx.ConnectError as exc:
-            raise LLMAnalysisError(
-                model=self._model,
-                reason=f"Cannot connect to Ollama at '{self._base_url}': {exc}",
-            ) from exc
-        except httpx.TimeoutException as exc:
-            raise LLMAnalysisError(
-                model=self._model,
-                reason=f"Ollama request timed out after {self._timeout}s: {exc}",
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise LLMAnalysisError(
-                model=self._model,
-                reason=f"Ollama HTTP error: {exc}",
-            ) from exc
-
-        if resp.status_code >= 400:
-            raise LLMAnalysisError(
-                model=self._model,
-                reason=f"Ollama returned HTTP {resp.status_code}: {resp.text[:300]}",
-            )
+        connect_timeout = 15.0
+        read_timeout = self._timeout
 
         try:
-            body: dict[str, Any] = resp.json()
-        except json.JSONDecodeError as exc:
+            chunks: list[str] = []
+            with httpx.Client(
+                timeout=httpx.Timeout(connect=connect_timeout, read=read_timeout, write=15.0, pool=5.0)
+            ) as client:
+                with client.stream("POST", url, json=payload) as resp:
+                    if resp.status_code >= 400:
+                        body_text = resp.read().decode("utf-8", errors="replace")
+                        raise LLMAnalysisError(
+                            model=self._model,
+                            reason=f"Ollama returned HTTP {resp.status_code}: {body_text[:300]}",
+                        )
+                    for line in resp.iter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            chunk: dict[str, Any] = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        token = (
+                            chunk.get("message", {}).get("content", "")
+                            or chunk.get("response", "")
+                        )
+                        if token:
+                            chunks.append(token)
+                        if chunk.get("done"):
+                            break
+        except LLMAnalysisError:
+            raise
+        except httpx.ConnectError:
             raise LLMAnalysisError(
                 model=self._model,
-                reason=f"Ollama response is not valid JSON: {exc}",
-            ) from exc
+                reason=f"Cannot connect to Ollama at '{self._base_url}'. Make sure Ollama is running.",
+            ) from None
+        except httpx.TimeoutException:
+            raise LLMAnalysisError(
+                model=self._model,
+                reason=f"Ollama connection timed out after {read_timeout}s. Try increasing OLLAMA_TIMEOUT in .env.",
+            ) from None
+        except httpx.HTTPError:
+            raise LLMAnalysisError(
+                model=self._model,
+                reason="Ollama HTTP error. Check that the Ollama server is reachable.",
+            ) from None
 
-        content: str = (
-            body.get("message", {}).get("content", "")
-            or body.get("response", "")
-        )
+        content = "".join(chunks)
         if not content:
             raise LLMAnalysisError(
                 model=self._model,
-                reason="Ollama response contains no content field.",
+                reason="Ollama returned an empty response. The model may have failed to generate output.",
             )
 
         return content
@@ -232,12 +244,12 @@ class OllamaLLMAdapter(LLMPort):
 
         try:
             raw_obj: dict[str, Any] = json.loads(json_str)
-        except json.JSONDecodeError as exc:
+        except json.JSONDecodeError:
             raise LLMAnalysisError(
                 model=self._model,
-                reason=f"LLM output is not parseable JSON: {exc}. "
+                reason="LLM returned output that could not be parsed as JSON. "
                        f"First 300 chars: {json_str[:300]}",
-            ) from exc
+            ) from None
 
         raw_obj.setdefault("metadata", {})
         raw_obj["metadata"]["region"] = region

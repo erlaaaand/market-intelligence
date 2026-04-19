@@ -85,10 +85,8 @@ class TrendAnalyzerUseCase:
                 region,
             )
             return raw_data
-        except DataExtractionError:
-            logger.exception(
-                "Trend provider failed for region='%s'.", region
-            )
+        except DataExtractionError as exc:
+            logger.error("Trend provider failed for region='%s': %s", region, exc.message)
             raise
 
     def _save_raw(self, raw_data: list[RawTrendData], filename: str) -> None:
@@ -127,8 +125,6 @@ class TrendAnalyzerUseCase:
                 len(report.market_trends),
             )
             return report
-        except LLMAnalysisError:
-            logger.exception(
-                "LLM analysis failed for region='%s'.", region
-            )
+        except LLMAnalysisError as exc:
+            logger.error("LLM analysis failed for region='%s': %s", region, exc.message)
             raise

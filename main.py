@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-# main.py
-
 import logging
 import sys
+
+from rich.logging import RichHandler
 
 from config import get_settings
 from src.application.trend_analyzer import TrendAnalyzerUseCase
@@ -15,11 +15,23 @@ from src.interfaces.cli import run_cli
 
 
 def _configure_logging(level: str) -> None:
+    # 1. Matikan log spam dari HTTPX dan HTTPCore agar terminal bersih
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    # 2. Gunakan RichHandler sebagai ganti StreamHandler biasa
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
-        format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-        stream=sys.stdout,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[
+            RichHandler(
+                rich_tracebacks=False, # Sama fungsinya dengan _NoTracebackFormatter Anda sebelumnya
+                markup=True,
+                show_path=False,
+                omit_repeated_times=False
+            )
+        ],
         force=True,
     )
 
@@ -29,22 +41,21 @@ def main() -> None:
 
     _configure_logging(settings.LOG_LEVEL)
     logger = logging.getLogger(__name__)
+    
+    # Menambahkan tag warna markup untuk output yang lebih elegan
     logger.info(
         "agent_market_intelligence starting  "
-        "trend_provider='%s'  llm_provider='%s'  region='%s'",
+        "trend_provider=[cyan]'%s'[/cyan]  llm_provider=[magenta]'%s'[/magenta]  region=[yellow]'%s'[/yellow]",
         settings.TREND_PROVIDER,
         settings.LLM_PROVIDER,
         settings.TARGET_REGION,
     )
 
-    # ── Storage adapter ───────────────────────────────────────────────
     storage_adapter = LocalStorageAdapter(
         raw_base_path=settings.RAW_DATA_PATH,
         processed_base_path=settings.PROCESSED_DATA_PATH,
-        briefs_base_path=settings.BRIEFS_DATA_PATH,
     )
 
-    # ── Trend provider adapter ────────────────────────────────────────
     if settings.TREND_PROVIDER == "youtube":
         trend_adapter: GoogleTrendsAdapter | YouTubeScraperAdapter = (
             YouTubeScraperAdapter()
@@ -59,7 +70,6 @@ def main() -> None:
         )
         logger.info("Trend provider: GoogleTrendsAdapter (3-tier fallback)")
 
-    # ── LLM adapter ───────────────────────────────────────────────────
     if settings.LLM_PROVIDER == "ollama":
         llm_adapter: OllamaLLMAdapter | MockLLMAdapter = OllamaLLMAdapter(
             base_url=settings.OLLAMA_BASE_URL,
@@ -79,7 +89,6 @@ def main() -> None:
             "in .env to use a real model)"
         )
 
-    # ── Use-case ──────────────────────────────────────────────────────
     use_case = TrendAnalyzerUseCase(
         trend_provider=trend_adapter,
         storage=storage_adapter,

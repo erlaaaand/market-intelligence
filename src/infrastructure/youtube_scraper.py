@@ -1,25 +1,5 @@
 from __future__ import annotations
 
-"""
-YouTubeScraperAdapter — production implementation of TrendProviderPort.
-
-Strategy (two-tier, no API key required by default):
-  1. **Innertube API** (primary) — The same internal JSON API that YouTube's
-     own web client uses. No API key, no OAuth. Sends a POST to
-     /youtubei/v1/browse with the "FEtrending" browse ID and a regionCode.
-     Returns trending videos with title, viewCount, and category.
-
-  2. **YouTube Data API v3** (optional, better quota) — If `YOUTUBE_API_KEY`
-     is set in the environment, uses the official
-     GET /youtube/v3/videos?chart=mostPopular endpoint.
-     Falls back to innertube if the key is absent or exhausted.
-
-Both paths return `RawTrendData` entities with:
-  - keyword  = video title (most useful signal for content trends)
-  - raw_value = percentile rank within the result set (1–100)
-  - metadata  = channel, view_count, category_id, video_id
-"""
-
 import json
 import logging
 import os
@@ -34,10 +14,6 @@ from src.core.exceptions import DataExtractionError, RateLimitExceededError
 from src.core.ports import TrendProviderPort
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 _SOURCE_NAME: Final[str] = "youtube_trending"
 
@@ -69,26 +45,7 @@ _USER_AGENTS: Final[list[str]] = [
     ),
 ]
 
-
-# ---------------------------------------------------------------------------
-# Adapter
-# ---------------------------------------------------------------------------
-
 class YouTubeScraperAdapter(TrendProviderPort):
-    """
-    Real YouTube trending adapter.
-
-    Primary path:  YouTube Innertube API (no key needed)
-    Secondary path: YouTube Data API v3 (requires YOUTUBE_API_KEY env var)
-
-    Args:
-        api_key:      YouTube Data API v3 key. If None, reads from
-                      YOUTUBE_API_KEY env var. Innertube is used if absent.
-        region:       Override; normally passed per-call via fetch_trends().
-        max_results:  Max trending videos to retrieve (default 50).
-        retries:      Max retry attempts per endpoint.
-        warn_on_use:  Kept for API compatibility — always False in this impl.
-    """
 
     def __init__(
         self,
@@ -100,10 +57,6 @@ class YouTubeScraperAdapter(TrendProviderPort):
         self._api_key: str | None = api_key or os.environ.get("YOUTUBE_API_KEY")
         self._max_results = min(max(1, max_results), 50)
         self._retries = retries
-
-    # ------------------------------------------------------------------
-    # TrendProviderPort
-    # ------------------------------------------------------------------
 
     def fetch_trends(self, region: str) -> list[RawTrendData]:
         region = region.upper().strip()
@@ -159,17 +112,9 @@ class YouTubeScraperAdapter(TrendProviderPort):
         )
         return []
 
-    # ------------------------------------------------------------------
-    # Innertube implementation
-    # ------------------------------------------------------------------
-
     def _fetch_via_innertube(
         self, client: httpx.Client, region: str
     ) -> list[RawTrendData]:
-        """
-        POST /youtubei/v1/browse with browseId=FEtrending.
-        Returns YouTube's trending page for the given region — no API key required.
-        """
         payload = {
             "browseId": _BROWSE_ID,
             "context": {
@@ -212,29 +157,10 @@ class YouTubeScraperAdapter(TrendProviderPort):
     def _parse_innertube_response(
         self, data: dict[str, object], region: str
     ) -> list[RawTrendData]:
-        """
-        Extract video renderer objects from the deeply nested Innertube JSON.
-
-        The relevant path is:
-          .contents
-            .twoColumnBrowseResultsRenderer
-              .tabs[0]
-                .tabRenderer
-                  .content
-                    .sectionListRenderer
-                      .contents[*]
-                        .itemSectionRenderer
-                          .contents[*]
-                            .shelfRenderer   ← category shelf (e.g. "Music")
-                              .content
-                                .expandedShelfContentsRenderer
-                                  .items[*]
-                                    .videoRenderer
-        """
         video_renderers: list[dict[str, object]] = []
 
         tabs: list[dict[str, object]] = (
-            data.get("contents", {})  # type: ignore[union-attr]
+            data.get("contents", {})
             .get("twoColumnBrowseResultsRenderer", {})
             .get("tabs", [])
         )
@@ -271,7 +197,6 @@ class YouTubeScraperAdapter(TrendProviderPort):
     def _extract_flat_video_renderers(
         self, data: dict[str, object]
     ) -> list[dict[str, object]]:
-        """Fallback: walk the entire JSON tree and collect all videoRenderer dicts."""
         results: list[dict[str, object]] = []
 
         def _walk(node: object) -> None:
@@ -330,17 +255,9 @@ class YouTubeScraperAdapter(TrendProviderPort):
 
         return records
 
-    # ------------------------------------------------------------------
-    # YouTube Data API v3 implementation
-    # ------------------------------------------------------------------
-
     def _fetch_via_data_api(
         self, client: httpx.Client, region: str
     ) -> list[RawTrendData]:
-        """
-        GET /youtube/v3/videos?chart=mostPopular&regionCode={region}
-        Requires a valid YOUTUBE_API_KEY.
-        """
         params = {
             "part": "snippet,statistics",
             "chart": "mostPopular",
@@ -367,15 +284,15 @@ class YouTubeScraperAdapter(TrendProviderPort):
             )
 
         data: dict[str, object] = resp.json()
-        items: list[dict[str, object]] = data.get("items", [])  # type: ignore[assignment]
+        items: list[dict[str, object]] = data.get("items", [])
         if not items:
             return []
 
         total = len(items)
         records: list[RawTrendData] = []
         for rank, item in enumerate(items):
-            snippet: dict[str, object] = item.get("snippet", {})  # type: ignore[assignment]
-            stats: dict[str, object] = item.get("statistics", {})  # type: ignore[assignment]
+            snippet: dict[str, object] = item.get("snippet", {})
+            stats: dict[str, object] = item.get("statistics", {})
             title = str(snippet.get("title", "")).strip()
             if not title:
                 continue
@@ -403,33 +320,24 @@ class YouTubeScraperAdapter(TrendProviderPort):
 
         return records
 
-    # ------------------------------------------------------------------
-    # Utility helpers
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _extract_text(obj: object) -> str:
-        """Extract a plain string from YouTube's various text container formats."""
         if obj is None:
             return ""
         if isinstance(obj, str):
             return obj.strip()
         if isinstance(obj, dict):
-            # {"simpleText": "..."}
             if "simpleText" in obj:
                 return str(obj["simpleText"]).strip()
-            # {"runs": [{"text": "..."}, ...]}
             if "runs" in obj:
-                runs: list[dict[str, str]] = obj["runs"]  # type: ignore[assignment]
+                runs: list[dict[str, str]] = obj["runs"]
                 return "".join(r.get("text", "") for r in runs).strip()
         return ""
 
     @staticmethod
     def _parse_view_count(text: str) -> int:
-        """Parse '1.2M views', '123K', '456,789 views' → int."""
         if not text:
             return 0
-        # Remove non-numeric suffix words
         t = text.lower().replace("views", "").replace("watching", "").strip()
         multipliers = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
         for suffix, mult in multipliers.items():
@@ -443,13 +351,7 @@ class YouTubeScraperAdapter(TrendProviderPort):
         except ValueError:
             return 0
 
-
-# ---------------------------------------------------------------------------
-# Helper shared with google_trends_api
-# ---------------------------------------------------------------------------
-
 def _score_from_rank(rank: int, total: int) -> int:
-    """Convert 0-based rank to a 1–100 volume score (top rank = 100)."""
     if total <= 1:
         return 100
     return max(1, round(100 * (1 - rank / total)))
