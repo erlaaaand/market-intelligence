@@ -1,0 +1,52 @@
+# ==============================
+# Python Cache & Bytecode
+# ==============================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# ==============================
+# Virtual Environments
+# ==============================
+venv/
+env/
+.venv/
+Scripts/
+
+# ==============================
+# Environment Variables
+# ==============================
+.env
+.env.local
+.env.*
+!.env.example
+
+# ==============================
+# Project Specific (Data & Logs)
+# ==============================
+# Abaikan semua isi folder data dan logs agar tidak memberatkan repository
+logs/*
+data/raw/*
+data/processed/*
+
+# (Opsional) Jika ingin foldernya tetap ada di Git tapi isinya kosong, 
+# buat file bernama .gitkeep di dalam folder tersebut dan uncomment baris di bawah:
+# !logs/.gitkeep
+# !data/raw/.gitkeep
+# !data/processed/.gitkeep
+
+# ==============================
+# Testing & Coverage
+# ==============================
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ==============================
+# IDEs & OS Specific
+# ==============================
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
