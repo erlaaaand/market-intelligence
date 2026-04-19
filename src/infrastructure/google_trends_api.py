@@ -1,35 +1,5 @@
 from __future__ import annotations
 
-"""
-GoogleTrendsAdapter — definitive, production-ready implementation.
-
-Root-cause analysis of the previous 404 failures
-─────────────────────────────────────────────────
-• /trends/api/dailytrends    → Google deprecated this in late 2024. Returns 404.
-• /trends/hottrends/atom     → Old Atom feed URL, also discontinued.
-• /trends/api/realtimetrends → Deprecated in favour of the new /trending page.
-
-What actually works (confirmed from user's own HTTP log showing 200 OK)
-────────────────────────────────────────────────────────────────────────
-1. /trends/api/explore
-2. /trends/api/widgetdata/multiline
-3. /trends/hottrends/visualize/internal/data  ← used by pytrends.trending_searches()
-4. /trending/rss?geo={ISO}                    ← Google's NEW RSS feed (2024 redesign)
-
-Fallback chain (most-reliable → least-reliable)
-────────────────────────────────────────────────
-Tier 1  pytrends.trending_searches()
-        Calls /trends/hottrends/visualize/internal/data. Returns real trending
-        search terms. pytrends manages the NID cookie session automatically.
-
-Tier 2  Google Trending RSS  /trending/rss?geo={ISO}
-        Replacement for the old Atom feed. Pure RSS 2.0, no cookies needed.
-
-Tier 3  interest_over_time via /explore + /widgetdata/multiline
-        Always responds with 200. Uses real keywords from Tier 1/2 when
-        available so the scores are meaningful, not just seed comparisons.
-"""
-
 import json
 import logging
 import random
@@ -49,9 +19,6 @@ from src.core.exceptions import (
 )
 from src.core.ports import TrendProviderPort
 
-# ── urllib3 v2 / pytrends compatibility shim ─────────────────────────────
-# pytrends 4.9.x passes `method_whitelist` which was renamed `allowed_methods`
-# in urllib3 2.0. Patch it before TrendReq is imported.
 class _CompatRetry(_UrllibRetry):
     def __init__(self, *args, method_whitelist=None, allowed_methods=None, **kwargs):
         if method_whitelist is not None and allowed_methods is None:
@@ -61,16 +28,11 @@ class _CompatRetry(_UrllibRetry):
 import pytrends.request as _pt_req
 _pt_req.Retry = _CompatRetry
 
-from pytrends.request import TrendReq  # noqa: E402
+from pytrends.request import TrendReq
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 _SOURCE_NAME: Final[str] = "google_trends"
-
 _TRENDING_RSS_URL: Final[str] = "https://trends.google.com/trending/rss"
 _EXPLORE_URL: Final[str] = "https://trends.google.com/trends/api/explore"
 _MULTILINE_URL: Final[str] = "https://trends.google.com/trends/api/widgetdata/multiline"
@@ -101,7 +63,6 @@ _USER_AGENTS: Final[list[str]] = [
     ),
 ]
 
-# Fallback seed keywords for interest_over_time when higher tiers return nothing
 _SEED_KEYWORDS: Final[list[str]] = [
     "AI tools 2025", "viral life hacks", "money making online",
     "fitness motivation", "cooking recipes easy", "travel destinations",
@@ -112,7 +73,6 @@ _SEED_KEYWORDS: Final[list[str]] = [
     "investing for beginners", "healthy recipes",
 ]
 
-# ISO 3166-1 → pytrends country name (used by trending_searches)
 _ISO_TO_PYTRENDS: Final[dict[str, str]] = {
     "AR": "argentina",     "AT": "austria",        "AU": "australia",
     "BD": "bangladesh",    "BE": "belgium",         "BR": "brazil",
@@ -135,19 +95,13 @@ _ISO_TO_PYTRENDS: Final[dict[str, str]] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _score_from_rank(rank: int, total: int) -> int:
-    """Convert 0-based rank → 1-100 volume score (top rank = 100)."""
     if total <= 1:
         return 100
     return max(1, round(100 * (1 - rank / total)))
 
 
 def _strip_xssi(text: str) -> str:
-    """Strip Google's XSSI protection prefix from JSON responses."""
     for prefix in (")]}',\n", ")]}'\n", ")]}',", ")]}'\n\n"):
         if text.startswith(prefix):
             return text[len(prefix):]
@@ -167,15 +121,7 @@ def _random_ua() -> str:
     return random.choice(_USER_AGENTS)
 
 
-# ---------------------------------------------------------------------------
-# Adapter
-# ---------------------------------------------------------------------------
-
 class GoogleTrendsAdapter(TrendProviderPort):
-    """
-    Production Google Trends adapter with a 3-tier fallback chain.
-    """
-
     def __init__(
         self,
         hl: str = "en-US",
@@ -187,10 +133,6 @@ class GoogleTrendsAdapter(TrendProviderPort):
         self._tz = tz
         self._retries = retries
         self._backoff_factor = backoff_factor
-
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
 
     def fetch_trends(self, region: str) -> list[RawTrendData]:
         region = region.upper().strip()
@@ -205,7 +147,7 @@ class GoogleTrendsAdapter(TrendProviderPort):
                     raise
                 sleep_s = self._calc_backoff(attempt)
                 logger.warning(
-                    "Rate limit hit (attempt %d/%d). Sleeping %.1fs …",
+                    "Rate limit hit (attempt %d/%d). Sleeping %.1fs ...",
                     attempt, self._retries, sleep_s,
                 )
                 time.sleep(sleep_s)
@@ -220,7 +162,7 @@ class GoogleTrendsAdapter(TrendProviderPort):
                         reason=f"All {self._retries} attempts failed: {type(exc).__name__}: {exc}",
                     ) from exc
                 logger.warning(
-                    "Attempt %d/%d failed (%s). Retrying …",
+                    "Attempt %d/%d failed (%s). Retrying ...",
                     attempt, self._retries, exc,
                 )
                 time.sleep(self._calc_backoff(attempt))
@@ -230,14 +172,9 @@ class GoogleTrendsAdapter(TrendProviderPort):
             reason=f"All {self._retries} attempts exhausted.",
         )
 
-    # ------------------------------------------------------------------
-    # Fallback chain
-    # ------------------------------------------------------------------
-
     def _fetch_with_fallback(self, region: str) -> list[RawTrendData]:
         collected_keywords: list[str] = []
 
-        # Tier 1 — pytrends.trending_searches()
         try:
             self._polite_sleep()
             results = self._try_pytrends_trending(region)
@@ -247,13 +184,12 @@ class GoogleTrendsAdapter(TrendProviderPort):
                     len(results), region,
                 )
                 return results
-            logger.debug("Tier 1 returned 0 results — trying Tier 2.")
+            logger.debug("Tier 1 returned 0 results - trying Tier 2.")
         except RateLimitExceededError:
             raise
         except Exception as exc:
-            logger.warning("Tier 1 failed (%s: %s) — trying Tier 2.", type(exc).__name__, exc)
+            logger.warning("Tier 1 failed (%s: %s) - trying Tier 2.", type(exc).__name__, exc)
 
-        # Tier 2 — Google Trending RSS
         try:
             self._polite_sleep()
             results = self._try_trending_rss(region)
@@ -264,13 +200,12 @@ class GoogleTrendsAdapter(TrendProviderPort):
                 )
                 collected_keywords = [r.keyword for r in results]
                 return results
-            logger.debug("Tier 2 returned 0 results — trying Tier 3.")
+            logger.debug("Tier 2 returned 0 results - trying Tier 3.")
         except RateLimitExceededError:
             raise
         except Exception as exc:
-            logger.warning("Tier 2 failed (%s: %s) — trying Tier 3.", type(exc).__name__, exc)
+            logger.warning("Tier 2 failed (%s: %s) - trying Tier 3.", type(exc).__name__, exc)
 
-        # Tier 3 — interest_over_time (always works, confirmed 200 from user's log)
         try:
             self._polite_sleep()
             results = self._try_interest_over_time(region, collected_keywords)
@@ -292,16 +227,7 @@ class GoogleTrendsAdapter(TrendProviderPort):
         )
         return []
 
-    # ------------------------------------------------------------------
-    # Tier 1: pytrends.trending_searches()
-    # ------------------------------------------------------------------
-
     def _try_pytrends_trending(self, region: str) -> list[RawTrendData]:
-        """
-        Calls /trends/hottrends/visualize/internal/data via pytrends.
-        Returns today's trending search terms. pytrends handles the NID
-        session cookie automatically.
-        """
         country_name = _ISO_TO_PYTRENDS.get(region)
         if not country_name:
             logger.debug(
@@ -347,16 +273,7 @@ class GoogleTrendsAdapter(TrendProviderPort):
             for rank, kw in enumerate(keywords)
         ]
 
-    # ------------------------------------------------------------------
-    # Tier 2: Google Trending RSS (/trending/rss — new 2024 endpoint)
-    # ------------------------------------------------------------------
-
     def _try_trending_rss(self, region: str) -> list[RawTrendData]:
-        """
-        GET https://trends.google.com/trending/rss?geo={ISO}
-        Google's new RSS feed (2023/2024 redesign of trends.google.com/trending).
-        Returns current trending searches as RSS 2.0 XML. No auth required.
-        """
         with self._make_httpx_client() as client:
             resp = client.get(
                 _TRENDING_RSS_URL,
@@ -381,7 +298,6 @@ class GoogleTrendsAdapter(TrendProviderPort):
         root = ET.fromstring(resp.text)
         titles: list[str] = []
 
-        # RSS 2.0: <rss><channel><item><title>…
         for item in root.iter("item"):
             title_el = item.find("title")
             if title_el is not None and title_el.text:
@@ -408,25 +324,14 @@ class GoogleTrendsAdapter(TrendProviderPort):
             for rank, t in enumerate(titles)
         ]
 
-    # ------------------------------------------------------------------
-    # Tier 3: interest_over_time (always works, confirmed 200 OK)
-    # ------------------------------------------------------------------
-
     def _try_interest_over_time(
         self, region: str, prior_keywords: list[str]
     ) -> list[RawTrendData]:
-        """
-        Two-step: /explore → token → /widgetdata/multiline → time-series.
-        Prefers real trending keywords from Tier 1/2; falls back to seed list.
-        Both /explore and /widgetdata/multiline confirmed working (200 OK).
-        """
         keywords = prior_keywords[:5] if prior_keywords else random.sample(
             _SEED_KEYWORDS, min(5, len(_SEED_KEYWORDS))
         )
 
         with self._make_httpx_client() as client:
-
-            # Step 1 — get widget token from /explore
             explore_req_obj = {
                 "comparisonItem": [
                     {"keyword": kw, "geo": region, "time": "now 7-d"}
@@ -454,7 +359,7 @@ class GoogleTrendsAdapter(TrendProviderPort):
                 )
 
             explore_data = _json_loads_xssi(resp1.text)
-            widgets: list[dict[str, object]] = explore_data.get("widgets", [])  # type: ignore[assignment]
+            widgets: list[dict[str, object]] = explore_data.get("widgets", [])
             iot_widget = next(
                 (w for w in widgets if w.get("id") == "TIMESERIES"), None
             )
@@ -462,9 +367,8 @@ class GoogleTrendsAdapter(TrendProviderPort):
                 return []
 
             token = str(iot_widget.get("token", ""))
-            req_payload: dict[str, object] = iot_widget.get("request", {})  # type: ignore[assignment]
+            req_payload: dict[str, object] = iot_widget.get("request", {})
 
-            # Step 2 — fetch time-series from /widgetdata/multiline
             self._polite_sleep()
             resp2 = client.get(
                 _MULTILINE_URL,
@@ -487,13 +391,13 @@ class GoogleTrendsAdapter(TrendProviderPort):
 
         ts_data = _json_loads_xssi(resp2.text)
         timeline: list[dict[str, object]] = (
-            ts_data.get("default", {}).get("timelineData", [])  # type: ignore[union-attr]
+            ts_data.get("default", {}).get("timelineData", [])
         )
 
         sums: dict[str, float] = {kw: 0.0 for kw in keywords}
         counts: dict[str, int] = {kw: 0 for kw in keywords}
         for point in timeline:
-            values: list[int] = point.get("value", [])  # type: ignore[assignment]
+            values: list[int] = point.get("value", [])
             for idx, kw in enumerate(keywords):
                 if idx < len(values):
                     sums[kw] += values[idx]
@@ -526,12 +430,7 @@ class GoogleTrendsAdapter(TrendProviderPort):
             if round(score) > 0
         ]
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
     def _make_httpx_client(self) -> httpx.Client:
-        """Create a fresh httpx client (httpx >= 0.28 compatible, no `proxies` kwarg)."""
         transport = httpx.HTTPTransport(retries=1, http2=True)
         return httpx.Client(
             headers={

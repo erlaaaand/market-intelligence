@@ -1,32 +1,13 @@
-# src/core/exceptions.py
-
-"""
-Custom domain exceptions for agent_market_intelligence.
-
-Following DDD principles, exceptions are defined in the core layer and
-represent business-meaningful error conditions. All exceptions carry a
-human-readable ``.message`` attribute for consistent upstream logging.
-"""
 from __future__ import annotations
 
 
 class AgentMarketIntelligenceError(Exception):
-    """Base exception for the entire agent_market_intelligence module."""
-
     def __init__(self, message: str) -> None:
         self.message = message
         super().__init__(self.message)
 
 
 class DataExtractionError(AgentMarketIntelligenceError):
-    """
-    Raised when data cannot be extracted from an external source.
-
-    Attributes:
-        source: Name of the data provider (e.g. "google_trends").
-        reason: Human-readable description of the failure.
-    """
-
     def __init__(self, source: str, reason: str) -> None:
         self.source = source
         self.reason = reason
@@ -34,19 +15,7 @@ class DataExtractionError(AgentMarketIntelligenceError):
 
 
 class RateLimitExceededError(AgentMarketIntelligenceError):
-    """
-    Raised when an external API returns HTTP 429 after all retries are exhausted.
-
-    Attributes:
-        source:              Name of the rate-limited provider.
-        retry_after_seconds: Optional hint from the response header.
-    """
-
-    def __init__(
-        self,
-        source: str,
-        retry_after_seconds: int | None = None,
-    ) -> None:
+    def __init__(self, source: str, retry_after_seconds: int | None = None) -> None:
         self.source = source
         self.retry_after_seconds = retry_after_seconds
         hint = (
@@ -58,57 +27,20 @@ class RateLimitExceededError(AgentMarketIntelligenceError):
 
 
 class StorageError(AgentMarketIntelligenceError):
-    """
-    Raised when data cannot be persisted to the storage backend.
-
-    Attributes:
-        path:   The filesystem path where the write failed.
-        reason: Human-readable description of the I/O failure.
-    """
-
     def __init__(self, path: str, reason: str) -> None:
         self.path = path
         self.reason = reason
         super().__init__(f"Storage operation failed at '{path}': {reason}")
 
 
-# ---------------------------------------------------------------------------
-# LLM Analysis exceptions
-# ---------------------------------------------------------------------------
-
 class LLMAnalysisError(AgentMarketIntelligenceError):
-    """
-    Raised when the LLM adapter cannot produce a valid ``MarketAnalysisReport``.
-
-    This covers:
-    • Network or authentication failures talking to the LLM backend.
-    • Non-recoverable JSON parse failures in the model response.
-    • Pydantic validation failures that cannot be gracefully recovered.
-
-    Attributes:
-        model:  Name of the LLM model that was called (e.g. "qwen3:30b").
-        reason: Human-readable description of the failure.
-    """
-
     def __init__(self, model: str, reason: str) -> None:
         self.model = model
         self.reason = reason
         super().__init__(f"LLM analysis failed (model='{model}'): {reason}")
 
 
-# ---------------------------------------------------------------------------
-# Content Brief Generator — domain exceptions (kept from v1)
-# ---------------------------------------------------------------------------
-
 class TrendFileNotFoundError(AgentMarketIntelligenceError):
-    """
-    Raised when no processable trend files exist at the expected location.
-
-    Attributes:
-        path:   Directory or file path that was searched.
-        reason: Actionable description of the failure.
-    """
-
     def __init__(self, path: str, reason: str) -> None:
         self.path = path
         self.reason = reason
@@ -116,14 +48,6 @@ class TrendFileNotFoundError(AgentMarketIntelligenceError):
 
 
 class TrendFileParseError(AgentMarketIntelligenceError):
-    """
-    Raised when a processed trend JSON file cannot be deserialised.
-
-    Attributes:
-        path:   Absolute path of the file that failed to parse.
-        reason: Description of the parse or validation failure.
-    """
-
     def __init__(self, path: str, reason: str) -> None:
         self.path = path
         self.reason = reason
@@ -131,14 +55,6 @@ class TrendFileParseError(AgentMarketIntelligenceError):
 
 
 class BriefGenerationError(AgentMarketIntelligenceError):
-    """
-    Raised when a ContentBrief cannot be constructed for a given TrendTopic.
-
-    Attributes:
-        topic:  The keyword or topic name that triggered the failure.
-        reason: Description of the generation failure.
-    """
-
     def __init__(self, topic: str, reason: str) -> None:
         self.topic = topic
         self.reason = reason

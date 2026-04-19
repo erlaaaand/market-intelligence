@@ -1,25 +1,9 @@
 from __future__ import annotations
 
-"""
-CLI interface — powered by ``rich`` for polished terminal UX.
-
-Flow
-────
-1. Parse args  →  optional --region flag to skip the region selector.
-2. Show header.
-3. Enter the main loop:
-      a. Select region (first run or after "Change region").
-      b. Fetch + display results with a spinner.
-      c. Show a post-fetch action menu:
-            [R] Run again   — same region, new fetch
-            [C] Change region
-            [E] Exit
-      d. Repeat until the user chooses Exit or sends Ctrl-C / Ctrl-D.
-"""
-
 import argparse
 import logging
 import sys
+from datetime import datetime, timezone
 from typing import Final, Literal
 
 from rich import box
@@ -33,19 +17,16 @@ from rich.text import Text
 from rich.theme import Theme
 
 from src.application.trend_analyzer import TrendAnalyzerUseCase
-from src.core.entities import TrendTopic
+from src.core.entities import MarketAnalysisReport, TrendTopic
 from src.core.exceptions import (
     AgentMarketIntelligenceError,
     DataExtractionError,
+    LLMAnalysisError,
     RateLimitExceededError,
     StorageError,
 )
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Console / theme
-# ---------------------------------------------------------------------------
 
 _THEME = Theme(
     {
@@ -57,8 +38,11 @@ _THEME = Theme(
         "volume_high": "bold red",
         "volume_mid": "bold yellow",
         "volume_low": "cyan",
-        "growing": "bold green",
-        "stable": "yellow",
+        "lifecycle_emerging": "bold green",
+        "lifecycle_trending": "bold bright_green",
+        "lifecycle_peak": "bold red",
+        "lifecycle_stagnant": "yellow",
+        "lifecycle_declining": "dim red",
         "angle": "magenta",
         "success": "bold green",
         "error": "bold red",
@@ -74,10 +58,6 @@ _THEME = Theme(
 )
 
 console = Console(theme=_THEME, highlight=False)
-
-# ---------------------------------------------------------------------------
-# Region registry
-# ---------------------------------------------------------------------------
 
 _REGIONS: Final[dict[str, str]] = {
     "US": "United States",
@@ -102,13 +82,15 @@ _REGIONS: Final[dict[str, str]] = {
     "IT": "Italy",
 }
 
-# Post-fetch action type
 _Action = Literal["again", "change", "exit"]
 
-
-# ---------------------------------------------------------------------------
-# Arg parser
-# ---------------------------------------------------------------------------
+_LIFECYCLE_STYLES: Final[dict[str, str]] = {
+    "Emerging": "lifecycle_emerging",
+    "Trending": "lifecycle_trending",
+    "Peak": "lifecycle_peak",
+    "Stagnant": "lifecycle_stagnant",
+    "Declining": "lifecycle_declining",
+}
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -139,18 +121,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# ---------------------------------------------------------------------------
-# Main entry-point
-# ---------------------------------------------------------------------------
-
-
 def run_cli(use_case: TrendAnalyzerUseCase, default_region: str) -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
 
     _print_header()
 
-    # Resolve the starting region from --region flag or selector
     if args.region:
         region = args.region.upper().strip()
         if len(region) != 2 or not region.isalpha():
@@ -160,12 +136,11 @@ def run_cli(use_case: TrendAnalyzerUseCase, default_region: str) -> None:
     else:
         region = _select_region_interactive()
 
-    # ── Main application loop ────────────────────────────────────────
     while True:
         logger.info("CLI: starting pipeline for region='%s'.", region)
 
-        results = _run_pipeline(use_case, region)
-        _print_results(results, region)
+        report = _run_pipeline(use_case, region)
+        _print_results(report, region)
 
         action = _prompt_action_menu(region)
 
@@ -175,17 +150,11 @@ def run_cli(use_case: TrendAnalyzerUseCase, default_region: str) -> None:
 
         if action == "change":
             region = _select_region_interactive()
-        # action == "again"  →  same region, loop continues
-
-
-# ---------------------------------------------------------------------------
-# Pipeline runner (handles all domain exceptions, returns [] on error)
-# ---------------------------------------------------------------------------
 
 
 def _run_pipeline(
     use_case: TrendAnalyzerUseCase, region: str
-) -> list[TrendTopic]:
+) -> MarketAnalysisReport | None:
     region_label = _REGIONS.get(region, "Custom Region")
 
     try:
@@ -201,10 +170,10 @@ def _run_pipeline(
             transient=True,
         ) as progress:
             task = progress.add_task("", total=None)
-            results = use_case.execute(region=region)
+            report = use_case.execute(region=region)
             progress.stop_task(task)
 
-        return results
+        return report
 
     except RateLimitExceededError as exc:
         _print_error(
@@ -221,6 +190,15 @@ def _run_pipeline(
                 "is supported by the active provider."
             ),
         )
+    except LLMAnalysisError as exc:
+        _print_error(
+            title="LLM Analysis Failed",
+            detail=exc.message,
+            hint=(
+                "Ensure Ollama is running and the model is available. "
+                "Set LLM_PROVIDER=mock in .env to use offline mode."
+            ),
+        )
     except StorageError as exc:
         _print_error(
             title="Storage Failure",
@@ -233,24 +211,10 @@ def _run_pipeline(
         console.print()
         console.print("[warning]  Interrupted — returning to menu.[/warning]")
 
-    return []
-
-
-# ---------------------------------------------------------------------------
-# Post-fetch action menu
-# ---------------------------------------------------------------------------
+    return None
 
 
 def _prompt_action_menu(region: str) -> _Action:
-    """
-    Display a 3-option menu and return the user's choice.
-
-    Options
-    ───────
-    [R]  Run again       — fetch the same region once more
-    [C]  Change region   — go back to the region selector
-    [E]  Exit            — quit the program
-    """
     region_name = _REGIONS.get(region, region)
 
     console.print(Rule(style="dim blue"))
@@ -296,13 +260,7 @@ def _prompt_action_menu(region: str) -> _Action:
         )
 
 
-# ---------------------------------------------------------------------------
-# Region selector
-# ---------------------------------------------------------------------------
-
-
 def _select_region_interactive() -> str:
-    """Display an interactive region picker and return the chosen ISO code."""
     region_list = list(_REGIONS.items())
 
     console.print()
@@ -315,7 +273,6 @@ def _select_region_interactive() -> str:
     )
     console.print()
 
-    # Split into 3 visual columns
     col_size = (len(region_list) + 2) // 3
     cols_data: list[Table] = []
     for c in range(3):
@@ -391,15 +348,10 @@ def _select_region_interactive() -> str:
         )
 
 
-# ---------------------------------------------------------------------------
-# Results table
-# ---------------------------------------------------------------------------
-
-
-def _print_results(topics: list[TrendTopic], region: str) -> None:
+def _print_results(report: MarketAnalysisReport | None, region: str) -> None:
     region_name = _REGIONS.get(region, region)
 
-    if not topics:
+    if report is None or not report.market_trends:
         console.print()
         console.print(
             Panel(
@@ -413,11 +365,13 @@ def _print_results(topics: list[TrendTopic], region: str) -> None:
         console.print()
         return
 
+    topics = report.market_trends
+
     tbl = Table(
         title=(
             f"[header]Trend Report[/header]  "
             f"[region]{region_name} ({region})[/region]  "
-            f"[subheader]· {len(topics)} topic(s) found[/subheader]"
+            f"[subheader]· {len(topics)} topic(s) found · {report.metadata.date}[/subheader]"
         ),
         box=box.ROUNDED,
         border_style="blue",
@@ -427,34 +381,35 @@ def _print_results(topics: list[TrendTopic], region: str) -> None:
         padding=(0, 1),
     )
 
-    tbl.add_column("#",            style="rank",  justify="right", width=3,  no_wrap=True)
-    tbl.add_column("Topic",        style="topic",                  min_width=20)
-    tbl.add_column("Volume",                      justify="center", width=12)
-    tbl.add_column("Status",                      justify="center", width=11)
-    tbl.add_column("Content Angle", style="angle",                 min_width=30)
+    tbl.add_column("#",             style="rank",  justify="right", width=3,  no_wrap=True)
+    tbl.add_column("Topic",         style="topic",                  min_width=20)
+    tbl.add_column("Momentum",                     justify="center", width=12)
+    tbl.add_column("Lifecycle",                    justify="center", width=12)
+    tbl.add_column("Key Drivers",   style="angle",                  min_width=30)
 
     for idx, topic in enumerate(topics, start=1):
-        volume_style = (
-            "volume_high" if topic.search_volume >= 80
-            else "volume_mid" if topic.search_volume >= 60
+        momentum = topic.metrics.momentum_score
+        momentum_style = (
+            "volume_high" if momentum >= 80
+            else "volume_mid" if momentum >= 60
             else "volume_low"
         )
-        volume_cell = Text()
-        volume_cell.append(f"{topic.search_volume:>3}/100", style=volume_style)
-        volume_cell.append(f"\n{_volume_bar(topic.search_volume)}")
+        momentum_cell = Text()
+        momentum_cell.append(f"{momentum:>5.1f}/100", style=momentum_style)
+        momentum_cell.append(f"\n{_volume_bar(int(momentum))}")
 
-        status = (
-            Text("↑ Growing", style="growing")
-            if topic.is_growing
-            else Text("→ Stable", style="stable")
-        )
+        lifecycle_val = topic.analysis.lifecycle_stage.value
+        lifecycle_style = _LIFECYCLE_STYLES.get(lifecycle_val, "subheader")
+        lifecycle_cell = Text(lifecycle_val, style=lifecycle_style)
+
+        drivers_text = "\n".join(f"• {d}" for d in topic.analysis.key_drivers[:3])
 
         tbl.add_row(
             str(idx),
-            topic.topic_name,
-            volume_cell,
-            status,
-            topic.suggested_angle,
+            topic.topic,
+            momentum_cell,
+            lifecycle_cell,
+            drivers_text,
         )
 
     console.print()
@@ -462,14 +417,9 @@ def _print_results(topics: list[TrendTopic], region: str) -> None:
     console.print()
     console.print(
         f"  [success]✓  {len(topics)} topic(s) saved to "
-        f"data/processed/{_today_label()}/[/success]"
+        f"data/processed/{region}/{report.metadata.date}/[/success]"
     )
     console.print()
-
-
-# ---------------------------------------------------------------------------
-# Header / goodbye
-# ---------------------------------------------------------------------------
 
 
 def _print_header() -> None:
@@ -500,13 +450,7 @@ def _print_goodbye() -> None:
     console.print()
 
 
-# ---------------------------------------------------------------------------
-# Error display (non-fatal — stays in loop)
-# ---------------------------------------------------------------------------
-
-
 def _print_error(title: str, detail: str, hint: str = "") -> None:
-    """Print an error panel without exiting; control returns to the menu."""
     logger.error("%s: %s", title, detail)
     body = f"[error]{detail}[/error]"
     if hint:
@@ -523,18 +467,10 @@ def _print_error(title: str, detail: str, hint: str = "") -> None:
     console.print()
 
 
-# ---------------------------------------------------------------------------
-# Small utilities
-# ---------------------------------------------------------------------------
-
-
 def _volume_bar(volume: int, width: int = 10) -> str:
-    """Return a unicode block progress bar string (e.g. ``██████░░░░``)."""
     filled = round(volume / 100 * width)
     return "█" * filled + "░" * (width - filled)
 
 
 def _today_label() -> str:
-    """Return today's UTC date string as used in the storage folder name."""
-    from datetime import datetime, timezone
     return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")

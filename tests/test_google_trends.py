@@ -1,15 +1,3 @@
-# tests/test_google_trends.py
-
-"""
-Unit tests for GoogleTrendsAdapter.
-
-All network calls are mocked — no real HTTP requests are made.
-
-Adapter fallback chain under test:
-  Tier 1 → _try_pytrends_trending   (pytrends TrendReq.trending_searches)
-  Tier 2 → _try_trending_rss        (Google Trending RSS feed)
-  Tier 3 → _try_interest_over_time  (/explore + /widgetdata/multiline)
-"""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -20,22 +8,14 @@ import pytest
 from src.core.exceptions import DataExtractionError, RateLimitExceededError
 from src.infrastructure.google_trends_api import (
     GoogleTrendsAdapter,
-    _ISO_TO_PYTRENDS,   # correct constant name (no _NAME suffix)
+    _ISO_TO_PYTRENDS,
     _score_from_rank,
 )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _make_adapter(retries: int = 2, backoff: float = 0.01) -> GoogleTrendsAdapter:
     return GoogleTrendsAdapter(hl="en-US", tz=360, retries=retries, backoff_factor=backoff)
 
-
-# ---------------------------------------------------------------------------
-# ISO → country name mapping
-# ---------------------------------------------------------------------------
 
 def test_iso_mapping_contains_common_regions() -> None:
     for iso in ("US", "ID", "GB", "AU", "SG", "IN", "JP"):
@@ -44,18 +24,14 @@ def test_iso_mapping_contains_common_regions() -> None:
 
 def test_iso_mapping_values_are_snake_case() -> None:
     for iso, name in _ISO_TO_PYTRENDS.items():
-        assert name == name.lower(), f"{iso} → '{name}' is not lowercase"
-        assert " " not in name, f"{iso} → '{name}' contains a space"
+        assert name == name.lower(), f"{iso} -> '{name}' is not lowercase"
+        assert " " not in name, f"{iso} -> '{name}' contains a space"
 
 
 def test_iso_mapping_covers_us_and_id() -> None:
     assert _ISO_TO_PYTRENDS["US"] == "united_states"
     assert _ISO_TO_PYTRENDS["ID"] == "indonesia"
 
-
-# ---------------------------------------------------------------------------
-# _score_from_rank helper
-# ---------------------------------------------------------------------------
 
 def test_score_from_rank_top_is_100() -> None:
     assert _score_from_rank(0, 10) == 100
@@ -71,15 +47,9 @@ def test_score_from_rank_decreases_with_rank() -> None:
     assert min(scores) >= 1
 
 
-# ---------------------------------------------------------------------------
-# Tier 1: pytrends.trending_searches (primary)
-# Patch TrendReq at the module level where it is imported.
-# ---------------------------------------------------------------------------
-
 @patch("src.infrastructure.google_trends_api.TrendReq", autospec=True)
 @patch("src.infrastructure.google_trends_api.time.sleep")
 def test_tier1_happy_path(mock_sleep: MagicMock, MockTrendReq: MagicMock) -> None:
-    """Tier 1 returns data → adapter returns it immediately."""
     adapter = _make_adapter()
     mock_df = pd.DataFrame({0: ["AI Boom", "Budget Phone", "Liga 1"]})
 
@@ -89,7 +59,6 @@ def test_tier1_happy_path(mock_sleep: MagicMock, MockTrendReq: MagicMock) -> Non
     results = adapter.fetch_trends("ID")
 
     assert len(results) == 3
-    # RawTrendData does NOT title-case — that only happens in TrendTopic
     assert results[0].keyword == "AI Boom"
     assert results[0].raw_value == 100
     assert results[0].region == "ID"
@@ -124,7 +93,7 @@ def test_tier1_normalises_region_to_uppercase(
     adapter = _make_adapter()
     MockTrendReq.return_value.trending_searches.return_value = pd.DataFrame({0: ["X"]})
 
-    results = adapter.fetch_trends("us")  # lowercase input
+    results = adapter.fetch_trends("us")
 
     assert results[0].region == "US"
 
@@ -134,28 +103,21 @@ def test_tier1_normalises_region_to_uppercase(
 def test_tier1_unknown_region_skips_to_tier2(
     mock_sleep: MagicMock, MockTrendReq: MagicMock
 ) -> None:
-    """Region not in mapping → Tier 1 skipped → falls back to Tier 2."""
     adapter = _make_adapter()
 
     with patch.object(adapter, "_try_trending_rss", return_value=[]) as mock_rss:
         with patch.object(adapter, "_try_interest_over_time", return_value=[]):
-            adapter.fetch_trends("XX")  # "XX" not in _ISO_TO_PYTRENDS
+            adapter.fetch_trends("XX")
 
-    # TrendReq should NOT be called for an unknown region
     MockTrendReq.assert_not_called()
     mock_rss.assert_called_once_with("XX")
 
-
-# ---------------------------------------------------------------------------
-# Tier 2: Google Trending RSS fallback
-# ---------------------------------------------------------------------------
 
 @patch("src.infrastructure.google_trends_api.TrendReq", autospec=True)
 @patch("src.infrastructure.google_trends_api.time.sleep")
 def test_tier2_used_when_tier1_returns_empty(
     mock_sleep: MagicMock, MockTrendReq: MagicMock
 ) -> None:
-    """Tier 1 returns empty DataFrame → Tier 2 RSS is tried."""
     adapter = _make_adapter()
     MockTrendReq.return_value.trending_searches.return_value = pd.DataFrame({0: []})
 
@@ -175,7 +137,6 @@ def test_tier2_used_when_tier1_returns_empty(
 def test_tier2_used_when_tier1_raises(
     mock_sleep: MagicMock, MockTrendReq: MagicMock
 ) -> None:
-    """Tier 1 raises an exception → Tier 2 is tried next."""
     adapter = _make_adapter(retries=1)
     MockTrendReq.return_value.trending_searches.side_effect = Exception("network error")
 
@@ -186,16 +147,11 @@ def test_tier2_used_when_tier1_raises(
     assert results == rss_records
 
 
-# ---------------------------------------------------------------------------
-# Tier 3: interest_over_time fallback
-# ---------------------------------------------------------------------------
-
 @patch("src.infrastructure.google_trends_api.TrendReq", autospec=True)
 @patch("src.infrastructure.google_trends_api.time.sleep")
 def test_tier3_used_when_tier1_and_tier2_fail(
     mock_sleep: MagicMock, MockTrendReq: MagicMock
 ) -> None:
-    """Both Tier 1 and Tier 2 return empty → Tier 3 is tried."""
     adapter = _make_adapter(retries=1)
     MockTrendReq.return_value.trending_searches.return_value = pd.DataFrame({0: []})
 
@@ -213,7 +169,6 @@ def test_tier3_used_when_tier1_and_tier2_fail(
 def test_all_tiers_fail_returns_empty_list(
     mock_sleep: MagicMock, MockTrendReq: MagicMock
 ) -> None:
-    """Pipeline must not crash when all tiers fail — return []."""
     adapter = _make_adapter(retries=1)
     MockTrendReq.return_value.trending_searches.side_effect = Exception("err")
 
@@ -224,16 +179,11 @@ def test_all_tiers_fail_returns_empty_list(
     assert results == []
 
 
-# ---------------------------------------------------------------------------
-# Rate limit handling
-# ---------------------------------------------------------------------------
-
 @patch("src.infrastructure.google_trends_api.TrendReq", autospec=True)
 @patch("src.infrastructure.google_trends_api.time.sleep")
 def test_rate_limit_propagated_after_all_retries(
     mock_sleep: MagicMock, MockTrendReq: MagicMock
 ) -> None:
-    """RateLimitExceededError must bubble up after all retries exhausted."""
     adapter = _make_adapter(retries=2)
 
     with patch.object(
@@ -248,7 +198,6 @@ def test_rate_limit_propagated_after_all_retries(
 def test_data_extraction_error_not_retried(
     mock_sleep: MagicMock, MockTrendReq: MagicMock
 ) -> None:
-    """DataExtractionError is a hard failure — must not be swallowed or retried."""
     adapter = _make_adapter(retries=3)
 
     with patch.object(
@@ -259,26 +208,18 @@ def test_data_extraction_error_not_retried(
         with pytest.raises(DataExtractionError):
             adapter.fetch_trends("US")
 
-    # Should be called only once — DataExtractionError is not retried
     mock_fetch.assert_called_once()
 
-
-# ---------------------------------------------------------------------------
-# Backoff helper
-# ---------------------------------------------------------------------------
 
 def test_calc_backoff_increases_with_attempt() -> None:
     adapter = GoogleTrendsAdapter(backoff_factor=2.0)
     delays = [adapter._calc_backoff(i) for i in range(1, 4)]
-    # Base: 2, 4, 8 — jitter always adds, so each must be >= base
     assert delays[0] >= 2.0
     assert delays[1] >= 4.0
     assert delays[2] >= 8.0
 
 
 def test_calc_backoff_includes_jitter() -> None:
-    """Two calls for the same attempt should almost never return identical values."""
     adapter = GoogleTrendsAdapter(backoff_factor=2.0)
     results = {adapter._calc_backoff(1) for _ in range(20)}
-    # With random jitter, at least 2 different values in 20 trials
     assert len(results) > 1

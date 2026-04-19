@@ -1,39 +1,5 @@
 from __future__ import annotations
 
-# src/infrastructure/llm_adapter.py
-
-"""
-LLM adapter implementations.
-
-Provided adapters
-─────────────────
-OllamaLLMAdapter   Production adapter — calls a local Ollama instance.
-                   Default model: qwen3:30b (configurable).
-                   Uses the Ollama /api/chat endpoint with format="json"
-                   to guarantee structured JSON output.
-
-MockLLMAdapter     Deterministic stub for tests and offline development.
-                   Generates realistic-looking analytics from raw data
-                   without any network calls.
-
-Both implement :class:`src.core.ports.LLMPort` and raise only
-:class:`src.core.exceptions.LLMAnalysisError` on unrecoverable failures.
-
-Ollama API contract
-───────────────────
-POST http://{host}/api/chat
-{
-  "model": "<model>",
-  "messages": [{"role":"system","content":"..."}, {"role":"user","content":"..."}],
-  "stream": false,
-  "format": "json",
-  "options": {"temperature": 0.1, "num_predict": 4096}
-}
-Response → {"message": {"content": "{...json...}"}, "done": true}
-"""
-
-from __future__ import annotations
-
 import json
 import logging
 import random
@@ -59,11 +25,6 @@ from src.core.exceptions import LLMAnalysisError
 from src.core.ports import LLMPort
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Embedded "Ultimate Prompt"
-# ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT: Final[str] = """
 [SYSTEM ROLE]
@@ -111,26 +72,12 @@ Anda adalah Advanced Market Intelligence Agent. Tugas utama Anda adalah mengekst
 """.strip()
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _strip_thinking_tags(text: str) -> str:
-    """
-    Strip ``<think>…</think>`` blocks that qwen3 thinking models may emit
-    before the actual JSON payload, even when ``format=json`` is set.
-    """
     cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     return cleaned.strip()
 
 
 def _extract_json_object(text: str) -> str:
-    """
-    Extract the first ``{ … }`` block from *text*.
-
-    Used as a last-resort fallback when the model emits extra prose around
-    the JSON object despite ``format=json``.
-    """
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1 or end <= start:
@@ -143,16 +90,11 @@ def _raw_records_to_user_message(
     region: str,
     analysis_date: str,
 ) -> str:
-    """
-    Format raw trending records into a concise user message for the LLM.
-
-    Keeps the payload small by only including the fields the model needs.
-    """
     compact = [
         {
             "rank": i + 1,
             "keyword": r.keyword,
-            "relative_interest": r.raw_value,   # 0–100
+            "relative_interest": r.raw_value,
             "source": r.source,
         }
         for i, r in enumerate(raw_data)
@@ -167,21 +109,7 @@ def _raw_records_to_user_message(
     )
 
 
-# ---------------------------------------------------------------------------
-# OllamaLLMAdapter
-# ---------------------------------------------------------------------------
-
 class OllamaLLMAdapter(LLMPort):
-    """
-    Production LLM adapter that calls a locally running Ollama instance.
-
-    Args:
-        base_url:  Ollama server base URL (default: http://localhost:11434).
-        model:     Ollama model tag (default: qwen3:30b).
-        timeout:   HTTP timeout in seconds for the /api/chat call.
-        retries:   Number of parse/validation retry attempts.
-    """
-
     _CHAT_PATH: Final[str] = "/api/chat"
 
     def __init__(
@@ -195,10 +123,6 @@ class OllamaLLMAdapter(LLMPort):
         self._model = model
         self._timeout = timeout
         self._retries = retries
-
-    # ------------------------------------------------------------------
-    # LLMPort
-    # ------------------------------------------------------------------
 
     def analyze_trends(
         self,
@@ -223,7 +147,7 @@ class OllamaLLMAdapter(LLMPort):
                 raw_json = self._call_ollama(url, user_msg)
                 return self._parse_and_validate(raw_json, region, analysis_date)
             except LLMAnalysisError:
-                raise   # hard failures are not retried
+                raise
             except Exception as exc:
                 last_exc = exc
                 logger.warning(
@@ -232,7 +156,7 @@ class OllamaLLMAdapter(LLMPort):
                     self._retries,
                     type(exc).__name__,
                     exc,
-                    "Retrying…" if attempt < self._retries else "Giving up.",
+                    "Retrying..." if attempt < self._retries else "Giving up.",
                 )
 
         raise LLMAnalysisError(
@@ -240,12 +164,7 @@ class OllamaLLMAdapter(LLMPort):
             reason=f"All {self._retries} attempts failed. Last error: {last_exc}",
         )
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
     def _call_ollama(self, url: str, user_message: str) -> str:
-        """POST to Ollama /api/chat and return the assistant's content string."""
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": [
@@ -253,9 +172,9 @@ class OllamaLLMAdapter(LLMPort):
                 {"role": "user", "content": user_message},
             ],
             "stream": False,
-            "format": "json",          # forces structured JSON output
+            "format": "json",
             "options": {
-                "temperature": 0.1,    # low temperature = more deterministic
+                "temperature": 0.1,
                 "num_predict": 4096,
             },
         }
@@ -295,7 +214,7 @@ class OllamaLLMAdapter(LLMPort):
 
         content: str = (
             body.get("message", {}).get("content", "")
-            or body.get("response", "")   # fallback for /api/generate shape
+            or body.get("response", "")
         )
         if not content:
             raise LLMAnalysisError(
@@ -308,20 +227,6 @@ class OllamaLLMAdapter(LLMPort):
     def _parse_and_validate(
         self, content: str, region: str, analysis_date: str
     ) -> MarketAnalysisReport:
-        """
-        Parse *content* (raw LLM string) into a validated ``MarketAnalysisReport``.
-
-        Recovery strategy (graceful degradation):
-        1. Strip <think>…</think> tags.
-        2. Extract the first { … } block.
-        3. JSON-parse the block.
-        4. Full Pydantic validation → if OK, return.
-        5. If validation fails, attempt per-item recovery:
-           - validate each trend individually, drop invalid ones.
-           - inject the correct metadata from our call context.
-           - if ≥1 trend survives, return the partial report.
-        6. Zero trends surviving → raise LLMAnalysisError.
-        """
         cleaned = _strip_thinking_tags(content)
         json_str = _extract_json_object(cleaned)
 
@@ -334,8 +239,6 @@ class OllamaLLMAdapter(LLMPort):
                        f"First 300 chars: {json_str[:300]}",
             ) from exc
 
-        # Ensure metadata is consistent with our call context (LLM may
-        # hallucinate wrong region or date).
         raw_obj.setdefault("metadata", {})
         raw_obj["metadata"]["region"] = region
         raw_obj["metadata"]["date"] = analysis_date
@@ -344,7 +247,6 @@ class OllamaLLMAdapter(LLMPort):
             datetime.now(tz=timezone.utc).isoformat(),
         )
 
-        # Attempt full validation first
         try:
             return MarketAnalysisReport.model_validate(raw_obj)
         except ValidationError as full_err:
@@ -354,7 +256,6 @@ class OllamaLLMAdapter(LLMPort):
                 full_err.error_count(),
             )
 
-        # Per-item recovery
         valid_trends: list[TrendTopic] = []
         for item in raw_obj.get("market_trends", []):
             if not isinstance(item, dict):
@@ -377,9 +278,7 @@ class OllamaLLMAdapter(LLMPort):
                 ),
             )
 
-        logger.info(
-            "Partial recovery: %d valid trend(s) salvaged.", len(valid_trends)
-        )
+        logger.info("Partial recovery: %d valid trend(s) salvaged.", len(valid_trends))
         return MarketAnalysisReport(
             metadata=ReportMetadata(
                 region=region,
@@ -388,10 +287,6 @@ class OllamaLLMAdapter(LLMPort):
             market_trends=valid_trends,
         )
 
-
-# ---------------------------------------------------------------------------
-# MockLLMAdapter  (deterministic stub — no network calls)
-# ---------------------------------------------------------------------------
 
 _MOCK_DRIVERS: Final[list[list[str]]] = [
     ["Social media virality", "Influencer amplification"],
@@ -405,7 +300,7 @@ _MOCK_DRIVERS: Final[list[list[str]]] = [
 ]
 
 _MOCK_IMPACTS: Final[list[str]] = [
-    "High short-term content opportunity; saturation likely within 7–14 days.",
+    "High short-term content opportunity; saturation likely within 7-14 days.",
     "Sustained audience interest expected; brand awareness campaigns recommended.",
     "Niche but loyal audience segment; long-form content will outperform shorts.",
     "Broad mainstream appeal; high competition from established publishers.",
@@ -417,7 +312,7 @@ _MOCK_IMPACTS: Final[list[str]] = [
 _MOCK_ANOMALY_POOL: Final[list[dict[str, str]]] = [
     {
         "type": "Sudden Volume Spike",
-        "description": "Search volume increased >3× within a 24-hour window, "
+        "description": "Search volume increased >3x within a 24-hour window, "
                        "suggesting a single triggering event.",
     },
     {
@@ -439,17 +334,6 @@ _MOCK_ANOMALY_POOL: Final[list[dict[str, str]]] = [
 
 
 class MockLLMAdapter(LLMPort):
-    """
-    Deterministic mock LLM adapter for offline development and unit tests.
-
-    Generates realistic-looking analytics derived from the raw input values
-    so assertions on relative ordering are stable across runs.
-
-    Args:
-        inject_anomaly_probability: Float 0–1 controlling how often an anomaly
-                                    is injected per trend. Default 0.3 (30%).
-    """
-
     def __init__(self, inject_anomaly_probability: float = 0.3) -> None:
         if not 0.0 <= inject_anomaly_probability <= 1.0:
             raise ValueError("inject_anomaly_probability must be in [0, 1]")
@@ -480,10 +364,6 @@ class MockLLMAdapter(LLMPort):
             market_trends=trends,
         )
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
     def _build_mock_trend(
         self,
         record: RawTrendData,
@@ -491,20 +371,17 @@ class MockLLMAdapter(LLMPort):
         region: str,
         analysis_date: str,
     ) -> TrendTopic:
-        v = record.raw_value  # 0–100
+        v = record.raw_value
 
-        # Derive scores deterministically from raw_value
         momentum = min(100.0, round(v * 0.9 + (index % 5) * 2.0, 2))
         volatility = min(100.0, round(100.0 - v * 0.6 + (index % 3) * 5.0, 2))
 
         lifecycle = self._lifecycle_from_value(v)
 
-        # Deterministic driver selection (stable for same index)
         drivers = _MOCK_DRIVERS[index % len(_MOCK_DRIVERS)]
         impact = _MOCK_IMPACTS[index % len(_MOCK_IMPACTS)]
 
         anomalies: list[Anomaly] = []
-        # Use a seeded RNG so tests are reproducible
         rng = random.Random(f"{region}:{record.keyword}:{analysis_date}")
         if rng.random() < self._anomaly_prob:
             anomaly_dict = _MOCK_ANOMALY_POOL[index % len(_MOCK_ANOMALY_POOL)]
@@ -529,16 +406,6 @@ class MockLLMAdapter(LLMPort):
 
     @staticmethod
     def _lifecycle_from_value(raw_value: int) -> LifecycleStage:
-        """
-        Map a raw_value score to a lifecycle stage.
-
-        Mapping (deterministic, no randomness):
-            80–100 → Peak
-            60–79  → Trending
-            40–59  → Emerging
-            20–39  → Stagnant
-            0–19   → Declining
-        """
         if raw_value >= 80:
             return LifecycleStage.PEAK
         if raw_value >= 60:
