@@ -63,7 +63,8 @@ def print_error(title: str, detail: str, hint: str = "") -> None:
 def print_results(report: MarketAnalysisReport | None, region: str) -> None:
     region_name = REGIONS.get(region, region)
 
-    if report is None or not report.market_trends:
+    # FIX: `report.market_trends` → `report.documents`
+    if report is None or not report.documents:
         console.print()
         console.print(
             Panel(
@@ -77,13 +78,15 @@ def print_results(report: MarketAnalysisReport | None, region: str) -> None:
         console.print()
         return
 
-    topics = report.market_trends
+    # FIX: `report.market_trends` → `report.documents`
+    topics = report.documents
 
     tbl = Table(
         title=(
             f"[header]Trend Report[/header]  "
             f"[region]{region_name} ({region})[/region]  "
-            f"[subheader]· {len(topics)} topic(s) found · {report.metadata.date}[/subheader]"
+            # FIX: `report.metadata.date` → `report.date`
+            f"[subheader]· {len(topics)} topic(s) found · {report.date}[/subheader]"
         ),
         box=box.ROUNDED,
         border_style="blue",
@@ -100,7 +103,8 @@ def print_results(report: MarketAnalysisReport | None, region: str) -> None:
     tbl.add_column("Key Drivers", style="angle",                  min_width=30)
 
     for idx, topic in enumerate(topics, start=1):
-        momentum = topic.metrics.momentum_score
+        # FIX: `topic.metrics.momentum_score` → `topic.trend_identity.metrics.momentum_score`
+        momentum = topic.trend_identity.metrics.momentum_score
         momentum_style = (
             "volume_high" if momentum >= 80
             else "volume_mid" if momentum >= 60
@@ -110,14 +114,17 @@ def print_results(report: MarketAnalysisReport | None, region: str) -> None:
         momentum_cell.append(f"{momentum:>5.1f}/100", style=momentum_style)
         momentum_cell.append(f"\n{_volume_bar(int(momentum))}")
 
-        lifecycle_val = topic.analysis.lifecycle_stage.value
+        # FIX: `topic.analysis.lifecycle_stage.value` → `topic.trend_identity.metrics.lifecycle_stage.value`
+        lifecycle_val = topic.trend_identity.metrics.lifecycle_stage.value
         lifecycle_style = LIFECYCLE_STYLES.get(lifecycle_val, "subheader")
 
-        drivers_text = "\n".join(f"• {d}" for d in topic.analysis.key_drivers[:3])
+        # FIX: `topic.analysis.key_drivers[:3]` → `topic.creative_brief.recommended_angles[:3]`
+        drivers_text = "\n".join(f"• {d}" for d in topic.creative_brief.recommended_angles[:3])
 
         tbl.add_row(
             str(idx),
-            topic.topic,
+            # FIX: `topic.topic` → `topic.trend_identity.topic`
+            topic.trend_identity.topic,
             momentum_cell,
             Text(lifecycle_val, style=lifecycle_style),
             drivers_text,
@@ -128,7 +135,8 @@ def print_results(report: MarketAnalysisReport | None, region: str) -> None:
     console.print()
     console.print(
         f"  [success]✓  {len(topics)} topic(s) saved to "
-        f"data/processed/{region}/{report.metadata.date}/[/success]"
+        # FIX: `report.metadata.date` → `report.date`
+        f"data/processed/{region}/{report.date}/[/success]"
     )
     console.print()
 
