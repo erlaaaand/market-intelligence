@@ -1,0 +1,11 @@
+# ── Core dependencies ──────────────────────────────────────────────────────
+pydantic>=2.7,<3.0
+pydantic-settings>=2.3,<3.0
+pytrends>=4.9.2,<5.0
+
+# ── HTTP / networking (pinned transitively by pytrends) ───────────────────
+requests>=2.31,<3.0
+
+# ── Development & testing ─────────────────────────────────────────────────
+pytest>=8.2,<9.0
+pytest-mock>=3.14,<4.0
