@@ -1,11 +1,11 @@
 # src/core/exceptions.py
 
 """
-Custom domain exceptions for the agent_market_intelligence module.
+Custom domain exceptions for agent_market_intelligence.
 
 Following DDD principles, exceptions are defined in the core layer and
 represent business-meaningful error conditions. All exceptions carry a
-human-readable `.message` attribute for consistent upstream logging.
+human-readable ``.message`` attribute for consistent upstream logging.
 """
 from __future__ import annotations
 
@@ -38,8 +38,8 @@ class RateLimitExceededError(AgentMarketIntelligenceError):
     Raised when an external API returns HTTP 429 after all retries are exhausted.
 
     Attributes:
-        source:                Name of the rate-limited provider.
-        retry_after_seconds:   Optional hint from the response header.
+        source:              Name of the rate-limited provider.
+        retry_after_seconds: Optional hint from the response header.
     """
 
     def __init__(
@@ -73,16 +73,36 @@ class StorageError(AgentMarketIntelligenceError):
 
 
 # ---------------------------------------------------------------------------
-# Content Brief Generator — domain exceptions
+# LLM Analysis exceptions
 # ---------------------------------------------------------------------------
 
+class LLMAnalysisError(AgentMarketIntelligenceError):
+    """
+    Raised when the LLM adapter cannot produce a valid ``MarketAnalysisReport``.
+
+    This covers:
+    • Network or authentication failures talking to the LLM backend.
+    • Non-recoverable JSON parse failures in the model response.
+    • Pydantic validation failures that cannot be gracefully recovered.
+
+    Attributes:
+        model:  Name of the LLM model that was called (e.g. "qwen3:30b").
+        reason: Human-readable description of the failure.
+    """
+
+    def __init__(self, model: str, reason: str) -> None:
+        self.model = model
+        self.reason = reason
+        super().__init__(f"LLM analysis failed (model='{model}'): {reason}")
+
+
+# ---------------------------------------------------------------------------
+# Content Brief Generator — domain exceptions (kept from v1)
+# ---------------------------------------------------------------------------
 
 class TrendFileNotFoundError(AgentMarketIntelligenceError):
     """
     Raised when no processable trend files exist at the expected location.
-
-    This typically means the upstream TrendAnalyzerUseCase has not been run yet,
-    or the configured PROCESSED_DATA_PATH directory is empty / missing.
 
     Attributes:
         path:   Directory or file path that was searched.
@@ -97,8 +117,7 @@ class TrendFileNotFoundError(AgentMarketIntelligenceError):
 
 class TrendFileParseError(AgentMarketIntelligenceError):
     """
-    Raised when a processed trend JSON file cannot be deserialised into
-    valid TrendTopic domain entities.
+    Raised when a processed trend JSON file cannot be deserialised.
 
     Attributes:
         path:   Absolute path of the file that failed to parse.

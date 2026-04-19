@@ -3,20 +3,18 @@
 """
 Application configuration via environment variables and `.env` file.
 
-Uses `pydantic-settings` v2 so every value is:
-  - Strictly typed and validated at startup.
-  - Overridable by environment variable (takes priority over .env).
-  - Documented via field descriptions.
+Uses `pydantic-settings` v2 so every value is strictly typed, validated at
+startup, and overridable by environment variable (which takes priority over
+the .env file).
 
 Usage:
     from config import get_settings
     settings = get_settings()
-    print(settings.TARGET_REGION)
+    print(settings.OLLAMA_MODEL)
 
 Testing:
-    # Clear the LRU cache between test cases that need different settings:
     from config import get_settings
-    get_settings.cache_clear()
+    get_settings.cache_clear()   # force re-read between test cases
 """
 from __future__ import annotations
 
@@ -60,16 +58,12 @@ class Settings(BaseSettings):
     )
     PROCESSED_DATA_PATH: str = Field(
         default="data/processed",
-        description="Filesystem directory for processed JSON output files.",
+        description="Root directory for processed market-analysis reports. "
+                    "Actual files land under <PROCESSED_DATA_PATH>/<REGION>/<DATE>/.",
     )
     BRIEFS_DATA_PATH: str = Field(
         default="data/briefs",
-        description=(
-            "Filesystem directory for generated content brief JSON files. "
-            "The Content Brief Generator writes individual brief files to "
-            "<BRIEFS_DATA_PATH>/individual/ and batch summary files directly "
-            "under <BRIEFS_DATA_PATH>/."
-        ),
+        description="Filesystem directory for generated content brief JSON files.",
     )
 
     # ── pytrends tunables ─────────────────────────────────────────────
@@ -93,6 +87,38 @@ class Settings(BaseSettings):
         description="Base back-off factor (seconds) for exponential retries.",
     )
 
+    # ── LLM (Ollama) settings ─────────────────────────────────────────
+    LLM_PROVIDER: str = Field(
+        default="mock",
+        description="LLM backend to use: 'ollama' | 'mock'. "
+                    "Use 'mock' for offline development and testing.",
+    )
+    OLLAMA_BASE_URL: str = Field(
+        default="http://localhost:11434",
+        description="Base URL for the locally running Ollama server.",
+    )
+    OLLAMA_MODEL: str = Field(
+        default="qwen3:30b",
+        description="Ollama model tag to call (e.g. 'qwen3:30b', 'llama3:8b').",
+    )
+    OLLAMA_TIMEOUT: float = Field(
+        default=120.0,
+        ge=10.0,
+        description="HTTP timeout in seconds for Ollama /api/chat calls.",
+    )
+    OLLAMA_RETRIES: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description="Number of parse/validation retry attempts for Ollama calls.",
+    )
+    LLM_TOP_N: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Maximum number of raw trending records sent to the LLM.",
+    )
+
     # ── Logging ───────────────────────────────────────────────────────
     LOG_LEVEL: str = Field(
         default="INFO",
@@ -103,7 +129,6 @@ class Settings(BaseSettings):
     @field_validator("TARGET_REGION", mode="before")
     @classmethod
     def _normalise_region(cls, value: str) -> str:
-        """Force the region code to uppercase and strip whitespace."""
         return str(value).strip().upper()
 
     @field_validator("TREND_PROVIDER", mode="before")
@@ -114,6 +139,17 @@ class Settings(BaseSettings):
         if normalised not in allowed:
             raise ValueError(
                 f"TREND_PROVIDER must be one of {sorted(allowed)}, got '{value}'."
+            )
+        return normalised
+
+    @field_validator("LLM_PROVIDER", mode="before")
+    @classmethod
+    def _validate_llm_provider(cls, value: str) -> str:
+        allowed = {"ollama", "mock"}
+        normalised = str(value).strip().lower()
+        if normalised not in allowed:
+            raise ValueError(
+                f"LLM_PROVIDER must be one of {sorted(allowed)}, got '{value}'."
             )
         return normalised
 
@@ -132,9 +168,9 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """
-    Return a cached singleton `Settings` instance.
+    Return a cached singleton ``Settings`` instance.
 
-    The `lru_cache` ensures `.env` is parsed exactly once per process.
-    Call `get_settings.cache_clear()` in tests to force re-loading.
+    The ``lru_cache`` ensures ``.env`` is parsed exactly once per process.
+    Call ``get_settings.cache_clear()`` in tests to force re-loading.
     """
     return Settings()

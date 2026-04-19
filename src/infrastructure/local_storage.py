@@ -3,17 +3,24 @@ from __future__ import annotations
 # src/infrastructure/local_storage.py
 
 """
-LocalStorageAdapter — filesystem implementation of StoragePort.
+LocalStorageAdapter — filesystem implementation of StoragePort (v2).
 
-Folder layout (date-partitioned, UTC):
+Folder layout
+─────────────
+Raw data (date-partitioned):
     <raw_base>/<YYYY-MM-DD>/<filename>.json
-    <processed_base>/<YYYY-MM-DD>/<filename>.json
+
+Processed reports (region + date partitioned):
+    <processed_base>/<REGION>/<YYYY-MM-DD>/<filename>.json
+    e.g.  data/processed/ID/2026-04-19/market_data_120045Z.json
+
+Briefs (date-partitioned):
     <briefs_base>/<YYYY-MM-DD>/<filename>.json
     <briefs_base>/<YYYY-MM-DD>/individual/<filename>.json
 
-Dated subdirectories are created lazily at write-time, so a long-running
-session that crosses midnight automatically starts a fresh folder without
-any restart required.
+All subdirectories are created lazily at write-time so a long-running
+session that crosses midnight (or changes region) always lands in the
+correct folder without any restart.
 
 Writes are atomic: every file is first written to a ``.tmp`` sibling, then
 renamed into place, so a crash mid-write never produces a corrupt JSON file.
@@ -25,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.core.entities import TrendTopic
+from src.core.entities import MarketAnalysisReport
 from src.core.exceptions import StorageError
 from src.core.ports import StoragePort
 
@@ -51,11 +58,15 @@ class _ISODateTimeEncoder(json.JSONEncoder):
 
 class LocalStorageAdapter(StoragePort):
     """
-    Filesystem storage adapter with automatic date-based folder partitioning.
+    Filesystem storage adapter with automatic path partitioning.
+
+    Processed reports are stored under ``<processed_base>/<REGION>/<DATE>/``
+    so that results from different regions and days are cleanly separated and
+    trivially discoverable by downstream consumers.
 
     Args:
         raw_base_path:       Root directory for raw JSON files.
-        processed_base_path: Root directory for processed JSON files.
+        processed_base_path: Root directory for processed report files.
         briefs_base_path:    Root directory for content brief JSON files.
                              Pass ``None`` to disable brief storage.
     """
@@ -78,19 +89,43 @@ class LocalStorageAdapter(StoragePort):
     # ------------------------------------------------------------------
 
     def save_raw(self, data: dict[str, object], filename: str) -> None:
-        """Persist a raw data payload under ``<raw>/<YYYY-MM-DD>/``."""
+        """
+        Persist a raw payload under:
+            ``<raw_base>/<YYYY-MM-DD>/<filename>``
+        """
         target = self._dated_dir(self._raw_path) / filename
         self._write_json(target, data)
         logger.info("Raw data saved  → %s", target)
 
-    def save_processed(self, data: list[TrendTopic], filename: str) -> None:
-        """Persist processed TrendTopic entities under ``<processed>/<YYYY-MM-DD>/``."""
-        payload: list[dict[str, object]] = [
-            topic.model_dump(mode="json") for topic in data
-        ]
-        target = self._dated_dir(self._processed_path) / filename
-        self._write_json(target, payload)
-        logger.info("Processed data saved  → %s", target)
+    def save_processed(
+        self, report: MarketAnalysisReport, filename: str
+    ) -> None:
+        """
+        Persist a ``MarketAnalysisReport`` under:
+            ``<processed_base>/<REGION>/<YYYY-MM-DD>/<filename>``
+
+        The region and date are read from ``report.metadata`` so the path
+        reflects the actual data provenance rather than today's run date.
+
+        Args:
+            report:   Validated ``MarketAnalysisReport`` to serialise.
+            filename: Target filename (e.g. ``market_data_120045Z.json``).
+        """
+        region = report.metadata.region     # e.g. "ID"
+        date_str = report.metadata.date     # e.g. "2026-04-19"
+
+        dated_dir = self._processed_path / region / date_str
+        try:
+            dated_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise StorageError(
+                path=str(dated_dir),
+                reason=f"Cannot create processed directory: {exc}",
+            ) from exc
+
+        target = dated_dir / filename
+        self._write_json(target, report.model_dump(mode="json"))
+        logger.info("Processed report saved  → %s", target)
 
     # ------------------------------------------------------------------
     # Extended interface (briefs)
@@ -123,12 +158,11 @@ class LocalStorageAdapter(StoragePort):
     # ------------------------------------------------------------------
 
     def _briefs_dir(self) -> Path:
-        """Return the briefs base path, raising StorageError if unconfigured."""
         if self._briefs_path is None:
             raise StorageError(
                 path="<briefs_base_path>",
                 reason=(
-                    "briefs_base_path was not configured on this adapter. "
+                    "briefs_base_path was not configured. "
                     "Pass briefs_base_path= to LocalStorageAdapter()."
                 ),
             )
@@ -140,12 +174,7 @@ class LocalStorageAdapter(StoragePort):
         return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
 
     def _dated_dir(self, base: Path) -> Path:
-        """
-        Return ``<base>/<YYYY-MM-DD>``, creating it if absent.
-
-        Called at write-time so the date always reflects *now*, even when the
-        adapter instance was created on a previous calendar day.
-        """
+        """Return ``<base>/<YYYY-MM-DD>``, creating it if absent."""
         dated = base / self._today_utc()
         try:
             dated.mkdir(parents=True, exist_ok=True)
@@ -174,10 +203,10 @@ class LocalStorageAdapter(StoragePort):
 
     def _write_json(self, target: Path, payload: object) -> None:
         """
-        Atomically write *payload* as pretty-printed JSON to *target*.
+        Atomically write *payload* as indented JSON to *target*.
 
-        Strategy: write to ``<target>.tmp``, then ``replace()`` into place.
-        A crash mid-write never leaves a corrupt or truncated JSON file.
+        Uses a ``.tmp`` sibling + ``replace()`` so a crash mid-write never
+        leaves a corrupt or truncated JSON file.
         """
         tmp = target.with_suffix(".tmp")
         try:
