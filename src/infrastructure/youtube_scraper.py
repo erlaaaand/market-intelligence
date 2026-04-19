@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import random
@@ -12,6 +11,12 @@ import httpx
 from src.core.entities import RawTrendData
 from src.core.exceptions import DataExtractionError, RateLimitExceededError
 from src.core.ports import TrendProviderPort
+from src.infrastructure.youtube_parser import (
+    parse_innertube_response,
+    score_from_rank,
+    extract_text,
+    parse_view_count,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +26,7 @@ _INNERTUBE_BASE: Final[str] = "https://www.youtube.com/youtubei/v1"
 _INNERTUBE_KEY: Final[str] = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"  # public YT web key
 _INNERTUBE_CLIENT_NAME: Final[str] = "WEB"
 _INNERTUBE_CLIENT_VERSION: Final[str] = "2.20240529.01.00"
-_BROWSE_ID: Final[str] = "FEtrending"  # YouTube's internal trending page ID
+_BROWSE_ID: Final[str] = "FEtrending"
 
 _YT_DATA_BASE: Final[str] = "https://www.googleapis.com/youtube/v3"
 _YT_DATA_MAX_RESULTS: Final[int] = 50
@@ -44,6 +49,7 @@ _USER_AGENTS: Final[list[str]] = [
         "Gecko/20100101 Firefox/126.0"
     ),
 ]
+
 
 class YouTubeScraperAdapter(TrendProviderPort):
 
@@ -68,7 +74,6 @@ class YouTubeScraperAdapter(TrendProviderPort):
             headers={"User-Agent": random.choice(_USER_AGENTS)},
         ) as client:
 
-            # Try Data API first if key is available (more reliable metadata)
             if self._api_key:
                 try:
                     results = self._fetch_via_data_api(client, region)
@@ -84,11 +89,8 @@ class YouTubeScraperAdapter(TrendProviderPort):
                         "YouTube Data API quota exceeded — falling back to Innertube."
                     )
                 except Exception as exc:
-                    logger.warning(
-                        "Data API failed (%s) — falling back to Innertube.", exc
-                    )
+                    logger.warning("Data API failed (%s) — falling back to Innertube.", exc)
 
-            # Primary / fallback: Innertube
             try:
                 results = self._fetch_via_innertube(client, region)
                 if results:
@@ -112,6 +114,8 @@ class YouTubeScraperAdapter(TrendProviderPort):
         )
         return []
 
+    # ── Innertube ─────────────────────────────────────────────────────
+
     def _fetch_via_innertube(
         self, client: httpx.Client, region: str
     ) -> list[RawTrendData]:
@@ -121,8 +125,8 @@ class YouTubeScraperAdapter(TrendProviderPort):
                 "client": {
                     "clientName": _INNERTUBE_CLIENT_NAME,
                     "clientVersion": _INNERTUBE_CLIENT_VERSION,
-                    "gl": region,      # country code
-                    "hl": "en",        # language
+                    "gl": region,
+                    "hl": "en",
                     "utcOffsetMinutes": 0,
                 }
             },
@@ -151,109 +155,9 @@ class YouTubeScraperAdapter(TrendProviderPort):
                 reason=f"Innertube HTTP {resp.status_code}",
             )
 
-        data: dict[str, object] = resp.json()
-        return self._parse_innertube_response(data, region)
+        return parse_innertube_response(resp.json(), region, _SOURCE_NAME)
 
-    def _parse_innertube_response(
-        self, data: dict[str, object], region: str
-    ) -> list[RawTrendData]:
-        video_renderers: list[dict[str, object]] = []
-
-        tabs: list[dict[str, object]] = (
-            data.get("contents", {})
-            .get("twoColumnBrowseResultsRenderer", {})
-            .get("tabs", [])
-        )
-        for tab in tabs:
-            tab_content = (
-                tab.get("tabRenderer", {})
-                .get("content", {})
-                .get("sectionListRenderer", {})
-                .get("contents", [])
-            )
-            for section in tab_content:
-                items = section.get("itemSectionRenderer", {}).get("contents", [])
-                for item in items:
-                    shelf = item.get("shelfRenderer", {})
-                    shelf_items = (
-                        shelf.get("content", {})
-                        .get("expandedShelfContentsRenderer", {})
-                        .get("items", [])
-                    )
-                    for shelf_item in shelf_items:
-                        vr = shelf_item.get("videoRenderer")
-                        if vr:
-                            video_renderers.append(vr)
-
-        if not video_renderers:
-            # Try a flatter path used by some region responses
-            video_renderers = self._extract_flat_video_renderers(data)
-
-        if not video_renderers:
-            return []
-
-        return self._video_renderers_to_records(video_renderers, region)
-
-    def _extract_flat_video_renderers(
-        self, data: dict[str, object]
-    ) -> list[dict[str, object]]:
-        results: list[dict[str, object]] = []
-
-        def _walk(node: object) -> None:
-            if isinstance(node, dict):
-                if "videoId" in node and "title" in node:
-                    results.append(node)  # type: ignore[arg-type]
-                for v in node.values():
-                    _walk(v)
-            elif isinstance(node, list):
-                for item in node:
-                    _walk(item)
-
-        _walk(data)
-        return results
-
-    def _video_renderers_to_records(
-        self,
-        renderers: list[dict[str, object]],
-        region: str,
-    ) -> list[RawTrendData]:
-        """Convert raw videoRenderer dicts → RawTrendData entities."""
-        total = len(renderers)
-        records: list[RawTrendData] = []
-
-        for rank, vr in enumerate(renderers):
-            title = self._extract_text(vr.get("title"))
-            if not title:
-                continue
-
-            video_id = str(vr.get("videoId", ""))
-            channel = self._extract_text(
-                vr.get("longBylineText") or vr.get("ownerText")
-            )
-            view_count_text = self._extract_text(
-                vr.get("viewCountText") or vr.get("shortViewCountText")
-            )
-            view_count = self._parse_view_count(view_count_text)
-
-            records.append(
-                RawTrendData(
-                    keyword=title,
-                    region=region,
-                    raw_value=_score_from_rank(rank, total),
-                    source=_SOURCE_NAME,
-                    metadata={
-                        "video_id": video_id,
-                        "channel": channel,
-                        "view_count_text": view_count_text,
-                        "view_count_approx": view_count,
-                        "rank": rank,
-                        "total_results": total,
-                        "endpoint": "innertube",
-                    },
-                )
-            )
-
-        return records
+    # ── YouTube Data API v3 ───────────────────────────────────────────
 
     def _fetch_via_data_api(
         self, client: httpx.Client, region: str
@@ -273,8 +177,7 @@ class YouTubeScraperAdapter(TrendProviderPort):
         )
 
         if resp.status_code == 429 or (
-            resp.status_code == 403
-            and "quotaExceeded" in resp.text
+            resp.status_code == 403 and "quotaExceeded" in resp.text
         ):
             raise RateLimitExceededError(source=_SOURCE_NAME)
         if resp.status_code >= 400:
@@ -283,8 +186,7 @@ class YouTubeScraperAdapter(TrendProviderPort):
                 reason=f"Data API HTTP {resp.status_code}: {resp.text[:200]}",
             )
 
-        data: dict[str, object] = resp.json()
-        items: list[dict[str, object]] = data.get("items", [])
+        items: list[dict[str, object]] = resp.json().get("items", [])
         if not items:
             return []
 
@@ -304,7 +206,7 @@ class YouTubeScraperAdapter(TrendProviderPort):
                 RawTrendData(
                     keyword=title,
                     region=region,
-                    raw_value=_score_from_rank(rank, total),
+                    raw_value=score_from_rank(rank, total),
                     source=_SOURCE_NAME,
                     metadata={
                         "video_id": str(item.get("id", "")),
@@ -319,39 +221,3 @@ class YouTubeScraperAdapter(TrendProviderPort):
             )
 
         return records
-
-    @staticmethod
-    def _extract_text(obj: object) -> str:
-        if obj is None:
-            return ""
-        if isinstance(obj, str):
-            return obj.strip()
-        if isinstance(obj, dict):
-            if "simpleText" in obj:
-                return str(obj["simpleText"]).strip()
-            if "runs" in obj:
-                runs: list[dict[str, str]] = obj["runs"]
-                return "".join(r.get("text", "") for r in runs).strip()
-        return ""
-
-    @staticmethod
-    def _parse_view_count(text: str) -> int:
-        if not text:
-            return 0
-        t = text.lower().replace("views", "").replace("watching", "").strip()
-        multipliers = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
-        for suffix, mult in multipliers.items():
-            if t.endswith(suffix):
-                try:
-                    return int(float(t[:-1].replace(",", "")) * mult)
-                except ValueError:
-                    return 0
-        try:
-            return int(t.replace(",", "").split(".")[0])
-        except ValueError:
-            return 0
-
-def _score_from_rank(rank: int, total: int) -> int:
-    if total <= 1:
-        return 100
-    return max(1, round(100 * (1 - rank / total)))
