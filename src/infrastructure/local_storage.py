@@ -38,19 +38,17 @@ class LocalStorageAdapter(StoragePort):
     def save_processed(
         self, batch: CreativeDocumentBatch, filename: str
     ) -> None:
-        region = batch.region
-        date_str = batch.date
+        target_dir = self._processed_path
 
-        dated_dir = self._processed_path / region / date_str
         try:
-            dated_dir.mkdir(parents=True, exist_ok=True)
+            target_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise StorageError(
-                path=str(dated_dir),
+                path=str(target_dir),
                 reason=f"Cannot create processed directory: {exc}",
             ) from exc
 
-        target = dated_dir / filename
+        target = target_dir / filename
         self._write_json(target, batch.model_dump(mode="json"))
         logger.info("Processed batch saved  → %s", target)
 
