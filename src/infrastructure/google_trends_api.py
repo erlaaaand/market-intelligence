@@ -8,6 +8,8 @@ from typing import Final
 
 import pandas as pd
 import requests
+from urllib3.util.retry import Retry as _UrllibRetry
+
 from pytrends.exceptions import ResponseError
 from pytrends.request import TrendReq
 
@@ -20,6 +22,22 @@ from src.core.exceptions import (
 from src.core.ports import TrendProviderPort
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Compatibility patch — urllib3 v2.x renamed `method_whitelist` → `allowed_methods`
+# pytrends 4.9.2 still passes `method_whitelist`, which raises TypeError on
+# urllib3 >= 2.0.  We inject a shim class into pytrends.request so TrendReq
+# never touches the old kwarg name.
+# ---------------------------------------------------------------------------
+class _CompatRetry(_UrllibRetry):
+    def __init__(self, *args, method_whitelist=None, allowed_methods=None, **kwargs):
+        if method_whitelist is not None and allowed_methods is None:
+            allowed_methods = method_whitelist
+        super().__init__(*args, allowed_methods=allowed_methods, **kwargs)
+
+import pytrends.request as _pytrends_request
+_pytrends_request.Retry = _CompatRetry
+# ---------------------------------------------------------------------------
 
 _SOURCE_NAME: Final[str] = "google_trends"
 _MAX_RETRIES: Final[int] = 3
@@ -83,7 +101,7 @@ def _score_from_rank(rank: int, total: int) -> int:
 
 
 def _strip_xssi(text: str) -> str:
-    for prefix in (")]}',\n", ")]}'\n", ")]}',", ")]}'"): 
+    for prefix in (")]}',\n", ")]}'\n", ")]}',", ")]}'" ):
         if text.startswith(prefix):
             return text[len(prefix):]
     return text
@@ -156,51 +174,80 @@ class GoogleTrendsAdapter(TrendProviderPort):
             if results:
                 logger.info("realtime: %d records region='%s'.", len(results), region)
                 return results
+            logger.debug("realtime: kosong untuk region='%s'.", region)
         except ResponseError as exc:
             if self._extract_status_code(exc) == 429:
                 raise
-            logger.warning("realtime gagal HTTP %d region='%s'.", self._extract_status_code(exc), region)
+            logger.warning(
+                "realtime gagal HTTP %d region='%s'. Lanjut fallback.",
+                self._extract_status_code(exc), region,
+            )
         except Exception as exc:
-            logger.warning("realtime error (%s) region='%s'.", type(exc).__name__, region)
+            logger.warning(
+                "realtime error (%s: %s) region='%s'. Lanjut fallback.",
+                type(exc).__name__, exc, region,
+            )
 
         try:
             results = self._try_today_searches_pytrends(client, region)
             if results:
                 logger.info("today_searches (pytrends): %d records region='%s'.", len(results), region)
                 return results
+            logger.debug("today_searches (pytrends): kosong untuk region='%s'.", region)
         except ResponseError as exc:
             if self._extract_status_code(exc) == 429:
                 raise
-            logger.warning("today_searches (pytrends) gagal HTTP %d region='%s'.", self._extract_status_code(exc), region)
+            logger.warning(
+                "today_searches (pytrends) gagal HTTP %d region='%s'. Lanjut fallback.",
+                self._extract_status_code(exc), region,
+            )
         except Exception as exc:
-            logger.warning("today_searches (pytrends) error (%s: %s) region='%s'.", type(exc).__name__, exc, region)
+            logger.warning(
+                "today_searches (pytrends) error (%s: %s) region='%s'. Lanjut fallback.",
+                type(exc).__name__, exc, region,
+            )
 
         try:
             results = self._try_today_searches_raw(client, region)
             if results:
                 logger.info("today_searches (raw): %d records region='%s'.", len(results), region)
                 return results
+            logger.debug("today_searches (raw): kosong untuk region='%s'.", region)
         except ResponseError as exc:
             if self._extract_status_code(exc) == 429:
                 raise
-            logger.warning("today_searches (raw) gagal HTTP %d region='%s'.", self._extract_status_code(exc), region)
+            logger.warning(
+                "today_searches (raw) gagal HTTP %d region='%s'. Lanjut fallback.",
+                self._extract_status_code(exc), region,
+            )
         except Exception as exc:
-            logger.warning("today_searches (raw) error (%s) region='%s'.", type(exc).__name__, region)
+            logger.warning(
+                "today_searches (raw) error (%s: %s) region='%s'. Lanjut fallback.",
+                type(exc).__name__, exc, region,
+            )
 
         try:
             results = self._try_interest_over_time(client, region)
             if results:
                 logger.info("interest_over_time: %d records region='%s'.", len(results), region)
                 return results
+            logger.debug("interest_over_time: kosong untuk region='%s'.", region)
         except ResponseError as exc:
             if self._extract_status_code(exc) == 429:
                 raise
-            logger.warning("interest_over_time gagal HTTP %d region='%s'.", self._extract_status_code(exc), region)
+            logger.warning(
+                "interest_over_time gagal HTTP %d region='%s'.",
+                self._extract_status_code(exc), region,
+            )
         except Exception as exc:
-            logger.warning("interest_over_time error (%s) region='%s'.", type(exc).__name__, region)
+            logger.warning(
+                "interest_over_time error (%s: %s) region='%s'.",
+                type(exc).__name__, exc, region,
+            )
 
         logger.error(
-            "Semua endpoint gagal untuk region='%s'. Kembalikan list kosong.",
+            "Semua endpoint gagal untuk region='%s'. Kembalikan list kosong. "
+            "Periksa koneksi internet dan pastikan Google Trends dapat diakses.",
             region,
         )
         return []
@@ -217,7 +264,8 @@ class GoogleTrendsAdapter(TrendProviderPort):
             if not title:
                 continue
             records.append(RawTrendData(
-                keyword=title, region=region,
+                keyword=title,
+                region=region,
                 raw_value=_score_from_rank(rank, total),
                 source=_SOURCE_NAME,
                 metadata={"rank": rank, "total_results": total, "endpoint": "realtime_trending_searches"},
@@ -235,7 +283,8 @@ class GoogleTrendsAdapter(TrendProviderPort):
         total = len(keywords)
         return [
             RawTrendData(
-                keyword=str(kw).strip(), region=region,
+                keyword=str(kw).strip(),
+                region=region,
                 raw_value=_score_from_rank(rank, total),
                 source=_SOURCE_NAME,
                 metadata={"rank": rank, "total_results": total, "endpoint": "today_searches_pytrends"},
@@ -265,7 +314,10 @@ class GoogleTrendsAdapter(TrendProviderPort):
                     timeout=(10, 30),
                 )
                 if resp.status_code == 429:
-                    raise ResponseError("HTTP 429", type("_R", (), {"status_code": 429})())
+                    raise ResponseError(
+                        "HTTP 429",
+                        type("_R", (), {"status_code": 429, "text": resp.text})(),
+                    )
                 if resp.status_code == 200:
                     text = _strip_xssi(resp.text)
                     data = json.loads(text)
@@ -282,12 +334,19 @@ class GoogleTrendsAdapter(TrendProviderPort):
                         total = len(queries)
                         return [
                             RawTrendData(
-                                keyword=q, region=region,
+                                keyword=q,
+                                region=region,
                                 raw_value=_score_from_rank(rank, total),
                                 source=_SOURCE_NAME,
-                                metadata={"rank": rank, "total_results": total, "endpoint": "today_searches_raw", "tz_used": tz_val},
+                                metadata={
+                                    "rank": rank,
+                                    "total_results": total,
+                                    "endpoint": "today_searches_raw",
+                                    "tz_used": tz_val,
+                                },
                             )
-                            for rank, q in enumerate(queries) if q
+                            for rank, q in enumerate(queries)
+                            if q
                         ]
             except ResponseError:
                 raise
@@ -297,23 +356,34 @@ class GoogleTrendsAdapter(TrendProviderPort):
         return []
 
     def _try_interest_over_time(self, client: TrendReq, region: str) -> list[RawTrendData]:
-        keywords = random.sample(_YOUTUBE_SHORTS_SEED_KEYWORDS, min(5, len(_YOUTUBE_SHORTS_SEED_KEYWORDS)))
+        keywords = random.sample(
+            _YOUTUBE_SHORTS_SEED_KEYWORDS,
+            min(5, len(_YOUTUBE_SHORTS_SEED_KEYWORDS)),
+        )
         self._polite_sleep()
-        client.build_payload(kw_list=keywords, cat=0, timeframe="now 7-d", geo=region, gprop="")
+        client.build_payload(
+            kw_list=keywords, cat=0, timeframe="now 7-d", geo=region, gprop=""
+        )
         df: pd.DataFrame = client.interest_over_time()
         if df is None or df.empty:
             return []
         if "isPartial" in df.columns:
             df = df.drop(columns=["isPartial"])
-        mean_scores = df.mean(axis=0).to_dict()
+        mean_scores: dict[str, float] = df.mean(axis=0).to_dict()
         sorted_kws = sorted(mean_scores.items(), key=lambda x: x[1], reverse=True)
         total = len(sorted_kws)
         return [
             RawTrendData(
-                keyword=kw, region=region,
+                keyword=kw,
+                region=region,
                 raw_value=max(1, min(100, round(score))),
                 source=_SOURCE_NAME,
-                metadata={"rank": rank, "total_results": total, "mean_score_7d": round(score, 2), "endpoint": "interest_over_time"},
+                metadata={
+                    "rank": rank,
+                    "total_results": total,
+                    "mean_score_7d": round(score, 2),
+                    "endpoint": "interest_over_time",
+                },
             )
             for rank, (kw, score) in enumerate(sorted_kws)
             if round(score) > 0
@@ -334,7 +404,8 @@ class GoogleTrendsAdapter(TrendProviderPort):
 
     def _calc_backoff(self, attempt: int) -> float:
         return round(
-            self._backoff_factor * (2 ** (attempt - 1)) + random.uniform(0.0, _MAX_JITTER_SECONDS),
+            self._backoff_factor * (2 ** (attempt - 1))
+            + random.uniform(0.0, _MAX_JITTER_SECONDS),
             2,
         )
 
