@@ -1,91 +1,144 @@
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime
-from pathlib import Path
-from typing import Any
+from datetime import datetime, timezone
 
-from src.core.entities import TrendTopic
-from src.core.exceptions import StorageError
-from src.core.ports import StoragePort
+from src.core.entities import RawTrendData, TrendTopic
+from src.core.exceptions import DataExtractionError
+from src.core.ports import StoragePort, TrendProviderPort
 
 logger = logging.getLogger(__name__)
 
+_TOP_N_TOPICS: int = 5
+_GROWTH_THRESHOLD: int = 60
+_HIGH_VOLUME_THRESHOLD: int = 80
+_RAW_FILENAME_TEMPLATE: str = "raw_{region}_{ts}.json"
+_PROCESSED_FILENAME_TEMPLATE: str = "processed_{region}_{ts}.json"
 
-class _ISODateTimeEncoder(json.JSONEncoder):
-    def default(self, obj: Any) -> str | Any:
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        return super().default(obj)
 
+class TrendAnalyzerUseCase:
+    """
+    Orchestrates the full trend-analysis pipeline:
+        fetch raw  →  save raw  →  process  →  save processed  →  return topics
 
-class LocalStorageAdapter(StoragePort):
+    Date-partitioned filenames: the *date* lives in the storage adapter's
+    folder structure (``YYYY-MM-DD/``), so filenames here only carry the
+    *time* component for uniqueness within a day.
+    """
 
     def __init__(
         self,
-        raw_base_path: str,
-        processed_base_path: str,
-        briefs_base_path: str | None = None,
+        trend_provider: TrendProviderPort,
+        storage: StoragePort,
+        top_n: int = _TOP_N_TOPICS,
+        growth_threshold: int = _GROWTH_THRESHOLD,
     ) -> None:
-        self._raw_path = Path(raw_base_path).resolve()
-        self._processed_path = Path(processed_base_path).resolve()
-        self._briefs_path = Path(briefs_base_path).resolve() if briefs_base_path else None
-        self._ensure_directories()
-
-    def save_raw(self, data: dict[str, object], filename: str) -> None:
-        target = self._raw_path / filename
-        self._write_json(target, data)
-        logger.info("Raw data saved → %s", target)
-
-    def save_processed(self, data: list[TrendTopic], filename: str) -> None:
-        payload: list[dict[str, object]] = [
-            topic.model_dump(mode="json") for topic in data
-        ]
-        target = self._processed_path / filename
-        self._write_json(target, payload)
-        logger.info("Processed data saved → %s", target)
-
-    def save_brief(self, data: dict[str, object], filename: str) -> None:
-        if self._briefs_path is None:
-            raise StorageError(
-                path="<briefs_base_path>",
-                reason="briefs_base_path was not configured on this adapter instance.",
+        if top_n < 1:
+            raise ValueError(f"top_n must be >= 1, got {top_n}")
+        if not (0 <= growth_threshold <= 100):
+            raise ValueError(
+                f"growth_threshold must be in 0–100, got {growth_threshold}"
             )
-        target = self._briefs_path / filename
-        self._write_json(target, data)
-        logger.info("Brief saved → %s", target)
+        self._trend_provider = trend_provider
+        self._storage = storage
+        self._top_n = top_n
+        self._growth_threshold = growth_threshold
 
-    def _ensure_directories(self) -> None:
-        directories = [self._raw_path, self._processed_path]
-        if self._briefs_path is not None:
-            directories.append(self._briefs_path)
-            directories.append(self._briefs_path / "individual")
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
-        for directory in directories:
-            try:
-                directory.mkdir(parents=True, exist_ok=True)
-                logger.debug("Directory ensured: %s", directory)
-            except OSError as exc:
-                raise StorageError(
-                    path=str(directory),
-                    reason=f"Cannot create directory: {exc}",
-                ) from exc
+    def execute(self, region: str) -> list[TrendTopic]:
+        region = region.upper().strip()
+        # Timestamp used only for the *filename* (folder = date from adapter)
+        timestamp: str = datetime.now(tz=timezone.utc).strftime("%H%M%SZ")
 
-    def _write_json(self, target: Path, payload: object) -> None:
-        tmp_target = target.with_suffix(".tmp")
+        logger.info(
+            "Pipeline start  region='%s'  top_n=%d", region, self._top_n
+        )
+
+        raw_data = self._fetch_raw(region)
+
+        raw_filename = _RAW_FILENAME_TEMPLATE.format(region=region, ts=timestamp)
+        self._save_raw(raw_data, raw_filename)
+
+        processed = self._process(raw_data, region)
+
+        if processed:
+            processed_filename = _PROCESSED_FILENAME_TEMPLATE.format(
+                region=region, ts=timestamp
+            )
+            self._storage.save_processed(processed, processed_filename)
+            logger.info(
+                "Saved %d processed topic(s)  → '%s'",
+                len(processed),
+                processed_filename,
+            )
+        else:
+            logger.warning(
+                "No processed topics for region='%s'. Skipping processed write.",
+                region,
+            )
+
+        logger.info("Pipeline complete. %d topic(s) ready.", len(processed))
+        return processed
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _fetch_raw(self, region: str) -> list[RawTrendData]:
         try:
-            serialised = json.dumps(payload, indent=2, cls=_ISODateTimeEncoder)
-            tmp_target.write_text(serialised, encoding="utf-8")
-            tmp_target.replace(target)
-            logger.debug("Written %d bytes → %s", len(serialised), target)
-        except (OSError, TypeError, ValueError) as exc:
-            if tmp_target.exists():
-                try:
-                    tmp_target.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            raise StorageError(
-                path=str(target),
-                reason=str(exc),
-            ) from exc
+            raw_data = self._trend_provider.fetch_trends(region)
+            logger.info(
+                "Fetched %d raw record(s) for region='%s'.", len(raw_data), region
+            )
+            return raw_data
+        except DataExtractionError:
+            logger.exception("Data extraction failed for region='%s'.", region)
+            raise
+
+    def _save_raw(self, raw_data: list[RawTrendData], filename: str) -> None:
+        payload: dict[str, object] = {
+            "count": len(raw_data),
+            "records": [item.model_dump(mode="json") for item in raw_data],
+        }
+        self._storage.save_raw(payload, filename)
+        logger.info("Saved %d raw record(s)  → '%s'.", len(raw_data), filename)
+
+    def _process(self, raw_data: list[RawTrendData], region: str) -> list[TrendTopic]:
+        if not raw_data:
+            logger.warning(
+                "No raw data to process for region='%s'. Returning empty list.",
+                region,
+            )
+            return []
+
+        top_n = sorted(raw_data, key=lambda r: r.raw_value, reverse=True)[
+            : self._top_n
+        ]
+
+        topics = [
+            TrendTopic(
+                topic_name=record.keyword,
+                search_volume=record.raw_value,
+                target_country=region,
+                suggested_angle=self._generate_angle(record.keyword, record.raw_value),
+                is_growing=record.raw_value >= self._growth_threshold,
+            )
+            for record in top_n
+        ]
+
+        logger.debug(
+            "Processed %d topic(s) from %d raw record(s).",
+            len(topics),
+            len(raw_data),
+        )
+        return topics
+
+    def _generate_angle(self, keyword: str, volume: int) -> str:
+        if volume >= _HIGH_VOLUME_THRESHOLD:
+            return f"Breaking: Why '{keyword}' is dominating search right now"
+        if volume >= self._growth_threshold:
+            return f"Emerging trend: What you need to know about '{keyword}'"
+        return f"Deep-dive: Exploring the growing interest in '{keyword}'"
