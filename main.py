@@ -1,16 +1,17 @@
 # main.py
 
 """
-Composition root for the agent_market_intelligence application.
+Composition root for agent_market_intelligence.
 
-This module is the ONLY place where concrete infrastructure adapters are
-instantiated and wired together. The application and core layers never
-import from `src.infrastructure` — only `main.py` does, keeping the
-dependency graph clean and adhering to the Dependency Inversion Principle.
+This is the ONLY module that imports from `src.infrastructure`.
+All concrete adapters are instantiated here and injected into the
+use-case, keeping the application and core layers free of infrastructure
+dependencies (Dependency Inversion Principle).
 
 Entry point:
     python main.py [--region CC]
 """
+from __future__ import annotations
 
 import logging
 import sys
@@ -24,12 +25,13 @@ from src.interfaces.cli import run_cli
 
 
 def _configure_logging(level: str) -> None:
-    """Set up root-level logging with a consistent format."""
+    """Configure root logger with a timestamp + level + name format."""
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
         format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
         stream=sys.stdout,
+        force=True,   # Override any handler installed by imported libs.
     )
 
 
@@ -38,11 +40,12 @@ def main() -> None:
     Application entry point.
 
     Execution order:
-      1. Load and validate settings from environment / .env.
-      2. Configure logging.
-      3. Instantiate concrete infrastructure adapters.
-      4. Inject adapters into the use-case (Dependency Injection).
-      5. Hand control to the CLI layer.
+        1. Load and validate settings from .env / environment.
+        2. Configure root-level logging.
+        3. Instantiate the storage adapter.
+        4. Instantiate the trend provider adapter (based on TREND_PROVIDER).
+        5. Wire everything into `TrendAnalyzerUseCase`.
+        6. Hand control to the CLI layer.
     """
     # ── 1. Settings ───────────────────────────────────────────────────
     settings = get_settings()
@@ -50,17 +53,26 @@ def main() -> None:
     # ── 2. Logging ────────────────────────────────────────────────────
     _configure_logging(settings.LOG_LEVEL)
     logger = logging.getLogger(__name__)
-    logger.info("Starting agent_market_intelligence (provider=%s).", settings.TREND_PROVIDER)
+    logger.info(
+        "agent_market_intelligence starting  provider='%s'  region='%s'",
+        settings.TREND_PROVIDER,
+        settings.TARGET_REGION,
+    )
 
-    # ── 3. Infrastructure adapters ────────────────────────────────────
+    # ── 3. Storage adapter ────────────────────────────────────────────
     storage_adapter = LocalStorageAdapter(
         raw_base_path=settings.RAW_DATA_PATH,
         processed_base_path=settings.PROCESSED_DATA_PATH,
     )
 
+    # ── 4. Trend provider adapter ─────────────────────────────────────
     if settings.TREND_PROVIDER == "youtube":
-        trend_adapter = YouTubeScraperAdapter()
-        logger.warning("Using YouTubeScraperAdapter (stub). Data is hardcoded.")
+        trend_adapter: GoogleTrendsAdapter | YouTubeScraperAdapter = (
+            YouTubeScraperAdapter(warn_on_use=True)
+        )
+        logger.warning(
+            "YouTubeScraperAdapter selected — this is a STUB returning hardcoded data."
+        )
     else:
         trend_adapter = GoogleTrendsAdapter(
             hl=settings.PYTRENDS_HL,
@@ -69,13 +81,13 @@ def main() -> None:
             backoff_factor=settings.PYTRENDS_BACKOFF_FACTOR,
         )
 
-    # ── 4. Use-case assembly (Dependency Injection) ───────────────────
+    # ── 5. Use-case assembly ──────────────────────────────────────────
     use_case = TrendAnalyzerUseCase(
         trend_provider=trend_adapter,
         storage=storage_adapter,
     )
 
-    # ── 5. CLI handoff ────────────────────────────────────────────────
+    # ── 6. CLI handoff ────────────────────────────────────────────────
     run_cli(use_case=use_case, default_region=settings.TARGET_REGION)
 
 

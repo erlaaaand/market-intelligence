@@ -1,18 +1,24 @@
 # config.py
 
 """
-Application configuration loaded from environment variables.
+Application configuration via environment variables and `.env` file.
 
-Uses `pydantic-settings` so that every config value is:
-  - Typed and validated at startup.
-  - Overridable via environment variables or a `.env` file.
+Uses `pydantic-settings` v2 so every value is:
+  - Strictly typed and validated at startup.
+  - Overridable by environment variable (takes priority over .env).
   - Documented via field descriptions.
 
 Usage:
     from config import get_settings
     settings = get_settings()
     print(settings.TARGET_REGION)
+
+Testing:
+    # Clear the LRU cache between test cases that need different settings:
+    from config import get_settings
+    get_settings.cache_clear()
 """
+from __future__ import annotations
 
 from functools import lru_cache
 
@@ -24,9 +30,10 @@ class Settings(BaseSettings):
     """
     Centralised, validated application settings.
 
-    All values can be overridden by setting the corresponding
-    environment variable (case-insensitive) or by placing them
-    in a `.env` file at the project root.
+    Precedence (highest → lowest):
+        1. Actual environment variables.
+        2. Values in the `.env` file at the project root.
+        3. Field defaults defined here.
     """
 
     model_config = SettingsConfigDict(
@@ -41,7 +48,6 @@ class Settings(BaseSettings):
         default="US",
         description="Default ISO 3166-1 alpha-2 country code for trend queries.",
     )
-
     TREND_PROVIDER: str = Field(
         default="google",
         description="Active trend provider: 'google' | 'youtube'.",
@@ -52,7 +58,6 @@ class Settings(BaseSettings):
         default="data/raw",
         description="Filesystem directory for raw JSON output files.",
     )
-
     PROCESSED_DATA_PATH: str = Field(
         default="data/processed",
         description="Filesystem directory for processed JSON output files.",
@@ -61,25 +66,22 @@ class Settings(BaseSettings):
     # ── pytrends tunables ─────────────────────────────────────────────
     PYTRENDS_HL: str = Field(
         default="en-US",
-        description="Host language passed to pytrends (e.g. 'en-US', 'id-ID').",
+        description="Host language for pytrends (e.g. 'en-US', 'id-ID').",
     )
-
     PYTRENDS_TZ: int = Field(
         default=360,
-        description="Timezone offset in minutes from UTC for pytrends session.",
+        description="Timezone offset in minutes from UTC (420 = WIB / UTC+7).",
     )
-
     PYTRENDS_RETRIES: int = Field(
         default=3,
         ge=1,
         le=10,
-        description="Maximum retry attempts on transient pytrends errors.",
+        description="Max retry attempts on transient pytrends errors.",
     )
-
     PYTRENDS_BACKOFF_FACTOR: float = Field(
         default=5.0,
         ge=0.5,
-        description="Base backoff factor (seconds) for exponential retry delays.",
+        description="Base back-off factor (seconds) for exponential retries.",
     )
 
     # ── Logging ───────────────────────────────────────────────────────
@@ -91,26 +93,30 @@ class Settings(BaseSettings):
     # ── Validators ────────────────────────────────────────────────────
     @field_validator("TARGET_REGION", mode="before")
     @classmethod
-    def normalise_region(cls, value: str) -> str:
-        """Ensure the region code is always uppercase."""
-        return value.strip().upper()
+    def _normalise_region(cls, value: str) -> str:
+        """Force the region code to uppercase and strip whitespace."""
+        return str(value).strip().upper()
 
     @field_validator("TREND_PROVIDER", mode="before")
     @classmethod
-    def validate_provider(cls, value: str) -> str:
+    def _validate_provider(cls, value: str) -> str:
         allowed = {"google", "youtube"}
-        normalised = value.strip().lower()
+        normalised = str(value).strip().lower()
         if normalised not in allowed:
-            raise ValueError(f"TREND_PROVIDER must be one of {allowed}, got '{value}'.")
+            raise ValueError(
+                f"TREND_PROVIDER must be one of {sorted(allowed)}, got '{value}'."
+            )
         return normalised
 
     @field_validator("LOG_LEVEL", mode="before")
     @classmethod
-    def validate_log_level(cls, value: str) -> str:
+    def _validate_log_level(cls, value: str) -> str:
         allowed = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-        normalised = value.strip().upper()
+        normalised = str(value).strip().upper()
         if normalised not in allowed:
-            raise ValueError(f"LOG_LEVEL must be one of {allowed}, got '{value}'.")
+            raise ValueError(
+                f"LOG_LEVEL must be one of {sorted(allowed)}, got '{value}'."
+            )
         return normalised
 
 
@@ -119,7 +125,7 @@ def get_settings() -> Settings:
     """
     Return a cached singleton `Settings` instance.
 
-    The `lru_cache` ensures the `.env` file is parsed only once per
-    process lifetime, which is both efficient and predictable.
+    The `lru_cache` ensures `.env` is parsed exactly once per process.
+    Call `get_settings.cache_clear()` in tests to force re-loading.
     """
     return Settings()

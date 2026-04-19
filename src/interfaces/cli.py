@@ -3,9 +3,12 @@
 """
 Command-line interface for the agent_market_intelligence module.
 
-Accepts a `--region` flag to override the default target country
-and delegates execution to the injected `TrendAnalyzerUseCase`.
+Parses `--region` from argv, validates it, then delegates to the
+injected `TrendAnalyzerUseCase`. All domain exceptions are caught here
+and presented as clean, user-friendly error messages before exiting
+with a non-zero code.
 """
+from __future__ import annotations
 
 import argparse
 import logging
@@ -22,6 +25,8 @@ from src.core.exceptions import (
 
 logger = logging.getLogger(__name__)
 
+_DIVIDER = "─" * 62
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     """
@@ -34,14 +39,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         prog="agent_market_intelligence",
         description=(
             "Fetch, filter, and persist trending market topics "
-            "from external providers (Google Trends, YouTube, …)."
+            "from external data providers (Google Trends, YouTube …)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
             "  python main.py --region US\n"
             "  python main.py --region ID\n"
-            "  python main.py  # uses TARGET_REGION from config / .env\n"
+            "  python main.py            # uses TARGET_REGION from .env / config\n"
         ),
     )
     parser.add_argument(
@@ -51,7 +56,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         metavar="CC",
         help=(
             "ISO 3166-1 alpha-2 country code (e.g. US, ID, GB). "
-            "Overrides the TARGET_REGION setting from config / .env."
+            "Overrides the TARGET_REGION setting in .env / config.py."
         ),
     )
     return parser
@@ -62,7 +67,7 @@ def run_cli(use_case: TrendAnalyzerUseCase, default_region: str) -> None:
     Parse CLI arguments and execute the market-intelligence pipeline.
 
     Args:
-        use_case:       Fully initialised `TrendAnalyzerUseCase` instance.
+        use_case:       Fully wired `TrendAnalyzerUseCase` instance.
         default_region: Fallback region when `--region` is not supplied.
     """
     parser = build_arg_parser()
@@ -70,58 +75,57 @@ def run_cli(use_case: TrendAnalyzerUseCase, default_region: str) -> None:
 
     region: str = (args.region or default_region).upper().strip()
 
+    # Validate country code format before hitting the network.
     if len(region) != 2 or not region.isalpha():
         parser.error(
             f"Invalid region code '{region}'. "
             "Expected a 2-letter ISO 3166-1 alpha-2 code (e.g. US, ID, GB)."
         )
 
-    logger.info("CLI: executing pipeline for region='%s'.", region)
+    logger.info("CLI: starting pipeline for region='%s'.", region)
 
     try:
         results: list[TrendTopic] = use_case.execute(region=region)
     except RateLimitExceededError as exc:
-        logger.error("Rate limit exceeded: %s", exc.message)
-        print(f"\n[ERROR] {exc.message}", file=sys.stderr)
-        sys.exit(1)
+        _exit_error("Rate limit exceeded", exc.message, code=2)
     except DataExtractionError as exc:
-        logger.error("Data extraction failed: %s", exc.message)
-        print(f"\n[ERROR] {exc.message}", file=sys.stderr)
-        sys.exit(1)
+        _exit_error("Data extraction failed", exc.message, code=3)
     except StorageError as exc:
-        logger.error("Storage failure: %s", exc.message)
-        print(f"\n[ERROR] {exc.message}", file=sys.stderr)
-        sys.exit(1)
+        _exit_error("Storage failure", exc.message, code=4)
     except AgentMarketIntelligenceError as exc:
-        logger.error("Unexpected domain error: %s", exc.message)
-        print(f"\n[ERROR] {exc.message}", file=sys.stderr)
-        sys.exit(1)
+        _exit_error("Unexpected domain error", exc.message, code=5)
 
     _print_results(results, region)
 
 
 # ------------------------------------------------------------------
-# Output formatting
+# Output formatting helpers
 # ------------------------------------------------------------------
 
 def _print_results(topics: list[TrendTopic], region: str) -> None:
-    """Render the processed trend topics as a human-readable summary."""
+    """Render the processed `TrendTopic` list as a human-readable table."""
     if not topics:
-        print(f"\nNo trending topics found for region '{region}'.")
+        print(f"\n  No trending topics found for region '{region}'.\n")
         return
 
-    divider = "─" * 60
-    print(f"\n{divider}")
+    print(f"\n{_DIVIDER}")
     print(f"  Market Intelligence Report  ·  Region: {region}")
-    print(divider)
+    print(_DIVIDER)
 
     for idx, topic in enumerate(topics, start=1):
-        growth_label = "↑ Growing" if topic.is_growing else "→ Stable"
+        growth_badge = "↑ Growing" if topic.is_growing else "→ Stable"
         print(
-            f"\n  {idx}. {topic.topic_name}\n"
-            f"     Volume : {topic.search_volume}/100   {growth_label}\n"
-            f"     Angle  : {topic.suggested_angle}"
+            f"\n  {idx:>2}. {topic.topic_name}\n"
+            f"       Volume : {topic.search_volume:>3}/100   {growth_badge}\n"
+            f"       Angle  : {topic.suggested_angle}"
         )
 
-    print(f"\n{divider}")
-    print(f"  {len(topics)} topic(s) saved to data/processed/\n")
+    print(f"\n{_DIVIDER}")
+    print(f"  ✓ {len(topics)} topic(s) persisted to data/processed/\n")
+
+
+def _exit_error(label: str, detail: str, code: int = 1) -> None:
+    """Print a structured error message to stderr and exit with *code*."""
+    logger.error("%s: %s", label, detail)
+    print(f"\n  [ERROR] {label}\n  {detail}\n", file=sys.stderr)
+    sys.exit(code)
