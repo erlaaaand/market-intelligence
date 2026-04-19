@@ -1,144 +1,193 @@
 from __future__ import annotations
 
+# src/infrastructure/local_storage.py
+
+"""
+LocalStorageAdapter — filesystem implementation of StoragePort.
+
+Folder layout (date-partitioned, UTC):
+    <raw_base>/<YYYY-MM-DD>/<filename>.json
+    <processed_base>/<YYYY-MM-DD>/<filename>.json
+    <briefs_base>/<YYYY-MM-DD>/<filename>.json
+    <briefs_base>/<YYYY-MM-DD>/individual/<filename>.json
+
+Dated subdirectories are created lazily at write-time, so a long-running
+session that crosses midnight automatically starts a fresh folder without
+any restart required.
+
+Writes are atomic: every file is first written to a ``.tmp`` sibling, then
+renamed into place, so a crash mid-write never produces a corrupt JSON file.
+"""
+
+import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
-from src.core.entities import RawTrendData, TrendTopic
-from src.core.exceptions import DataExtractionError
-from src.core.ports import StoragePort, TrendProviderPort
+from src.core.entities import TrendTopic
+from src.core.exceptions import StorageError
+from src.core.ports import StoragePort
 
 logger = logging.getLogger(__name__)
 
-_TOP_N_TOPICS: int = 5
-_GROWTH_THRESHOLD: int = 60
-_HIGH_VOLUME_THRESHOLD: int = 80
-_RAW_FILENAME_TEMPLATE: str = "raw_{region}_{ts}.json"
-_PROCESSED_FILENAME_TEMPLATE: str = "processed_{region}_{ts}.json"
+
+# ---------------------------------------------------------------------------
+# JSON encoder
+# ---------------------------------------------------------------------------
+
+class _ISODateTimeEncoder(json.JSONEncoder):
+    """Encode :class:`datetime` objects as ISO-8601 strings."""
+
+    def default(self, obj: Any) -> Any:
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
 
 
-class TrendAnalyzerUseCase:
+# ---------------------------------------------------------------------------
+# Adapter
+# ---------------------------------------------------------------------------
+
+class LocalStorageAdapter(StoragePort):
     """
-    Orchestrates the full trend-analysis pipeline:
-        fetch raw  →  save raw  →  process  →  save processed  →  return topics
+    Filesystem storage adapter with automatic date-based folder partitioning.
 
-    Date-partitioned filenames: the *date* lives in the storage adapter's
-    folder structure (``YYYY-MM-DD/``), so filenames here only carry the
-    *time* component for uniqueness within a day.
+    Args:
+        raw_base_path:       Root directory for raw JSON files.
+        processed_base_path: Root directory for processed JSON files.
+        briefs_base_path:    Root directory for content brief JSON files.
+                             Pass ``None`` to disable brief storage.
     """
 
     def __init__(
         self,
-        trend_provider: TrendProviderPort,
-        storage: StoragePort,
-        top_n: int = _TOP_N_TOPICS,
-        growth_threshold: int = _GROWTH_THRESHOLD,
+        raw_base_path: str,
+        processed_base_path: str,
+        briefs_base_path: str | None = None,
     ) -> None:
-        if top_n < 1:
-            raise ValueError(f"top_n must be >= 1, got {top_n}")
-        if not (0 <= growth_threshold <= 100):
-            raise ValueError(
-                f"growth_threshold must be in 0–100, got {growth_threshold}"
-            )
-        self._trend_provider = trend_provider
-        self._storage = storage
-        self._top_n = top_n
-        self._growth_threshold = growth_threshold
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def execute(self, region: str) -> list[TrendTopic]:
-        region = region.upper().strip()
-        # Timestamp used only for the *filename* (folder = date from adapter)
-        timestamp: str = datetime.now(tz=timezone.utc).strftime("%H%M%SZ")
-
-        logger.info(
-            "Pipeline start  region='%s'  top_n=%d", region, self._top_n
+        self._raw_path = Path(raw_base_path).resolve()
+        self._processed_path = Path(processed_base_path).resolve()
+        self._briefs_path = (
+            Path(briefs_base_path).resolve() if briefs_base_path else None
         )
+        self._ensure_base_directories()
 
-        raw_data = self._fetch_raw(region)
+    # ------------------------------------------------------------------
+    # StoragePort interface
+    # ------------------------------------------------------------------
 
-        raw_filename = _RAW_FILENAME_TEMPLATE.format(region=region, ts=timestamp)
-        self._save_raw(raw_data, raw_filename)
+    def save_raw(self, data: dict[str, object], filename: str) -> None:
+        """Persist a raw data payload under ``<raw>/<YYYY-MM-DD>/``."""
+        target = self._dated_dir(self._raw_path) / filename
+        self._write_json(target, data)
+        logger.info("Raw data saved  → %s", target)
 
-        processed = self._process(raw_data, region)
+    def save_processed(self, data: list[TrendTopic], filename: str) -> None:
+        """Persist processed TrendTopic entities under ``<processed>/<YYYY-MM-DD>/``."""
+        payload: list[dict[str, object]] = [
+            topic.model_dump(mode="json") for topic in data
+        ]
+        target = self._dated_dir(self._processed_path) / filename
+        self._write_json(target, payload)
+        logger.info("Processed data saved  → %s", target)
 
-        if processed:
-            processed_filename = _PROCESSED_FILENAME_TEMPLATE.format(
-                region=region, ts=timestamp
-            )
-            self._storage.save_processed(processed, processed_filename)
-            logger.info(
-                "Saved %d processed topic(s)  → '%s'",
-                len(processed),
-                processed_filename,
-            )
-        else:
-            logger.warning(
-                "No processed topics for region='%s'. Skipping processed write.",
-                region,
-            )
+    # ------------------------------------------------------------------
+    # Extended interface (briefs)
+    # ------------------------------------------------------------------
 
-        logger.info("Pipeline complete. %d topic(s) ready.", len(processed))
-        return processed
+    def save_brief(self, data: dict[str, object], filename: str) -> None:
+        """Persist a batch brief summary under ``<briefs>/<YYYY-MM-DD>/``."""
+        target = self._dated_dir(self._briefs_dir()) / filename
+        self._write_json(target, data)
+        logger.info("Brief saved  → %s", target)
+
+    def save_brief_individual(
+        self, data: dict[str, object], filename: str
+    ) -> None:
+        """Persist an individual brief under ``<briefs>/<YYYY-MM-DD>/individual/``."""
+        individual_dir = self._dated_dir(self._briefs_dir()) / "individual"
+        try:
+            individual_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise StorageError(
+                path=str(individual_dir),
+                reason=f"Cannot create individual brief directory: {exc}",
+            ) from exc
+        target = individual_dir / filename
+        self._write_json(target, data)
+        logger.info("Individual brief saved  → %s", target)
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _fetch_raw(self, region: str) -> list[RawTrendData]:
+    def _briefs_dir(self) -> Path:
+        """Return the briefs base path, raising StorageError if unconfigured."""
+        if self._briefs_path is None:
+            raise StorageError(
+                path="<briefs_base_path>",
+                reason=(
+                    "briefs_base_path was not configured on this adapter. "
+                    "Pass briefs_base_path= to LocalStorageAdapter()."
+                ),
+            )
+        return self._briefs_path
+
+    @staticmethod
+    def _today_utc() -> str:
+        """Return today's UTC date as ``YYYY-MM-DD``."""
+        return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+
+    def _dated_dir(self, base: Path) -> Path:
+        """
+        Return ``<base>/<YYYY-MM-DD>``, creating it if absent.
+
+        Called at write-time so the date always reflects *now*, even when the
+        adapter instance was created on a previous calendar day.
+        """
+        dated = base / self._today_utc()
         try:
-            raw_data = self._trend_provider.fetch_trends(region)
-            logger.info(
-                "Fetched %d raw record(s) for region='%s'.", len(raw_data), region
-            )
-            return raw_data
-        except DataExtractionError:
-            logger.exception("Data extraction failed for region='%s'.", region)
-            raise
+            dated.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise StorageError(
+                path=str(dated),
+                reason=f"Cannot create dated directory: {exc}",
+            ) from exc
+        return dated
 
-    def _save_raw(self, raw_data: list[RawTrendData], filename: str) -> None:
-        payload: dict[str, object] = {
-            "count": len(raw_data),
-            "records": [item.model_dump(mode="json") for item in raw_data],
-        }
-        self._storage.save_raw(payload, filename)
-        logger.info("Saved %d raw record(s)  → '%s'.", len(raw_data), filename)
+    def _ensure_base_directories(self) -> None:
+        """Create root base directories eagerly at construction time."""
+        bases = [self._raw_path, self._processed_path]
+        if self._briefs_path is not None:
+            bases.append(self._briefs_path)
 
-    def _process(self, raw_data: list[RawTrendData], region: str) -> list[TrendTopic]:
-        if not raw_data:
-            logger.warning(
-                "No raw data to process for region='%s'. Returning empty list.",
-                region,
-            )
-            return []
+        for directory in bases:
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                logger.debug("Base directory ensured: %s", directory)
+            except OSError as exc:
+                raise StorageError(
+                    path=str(directory),
+                    reason=f"Cannot create base directory: {exc}",
+                ) from exc
 
-        top_n = sorted(raw_data, key=lambda r: r.raw_value, reverse=True)[
-            : self._top_n
-        ]
+    def _write_json(self, target: Path, payload: object) -> None:
+        """
+        Atomically write *payload* as pretty-printed JSON to *target*.
 
-        topics = [
-            TrendTopic(
-                topic_name=record.keyword,
-                search_volume=record.raw_value,
-                target_country=region,
-                suggested_angle=self._generate_angle(record.keyword, record.raw_value),
-                is_growing=record.raw_value >= self._growth_threshold,
-            )
-            for record in top_n
-        ]
-
-        logger.debug(
-            "Processed %d topic(s) from %d raw record(s).",
-            len(topics),
-            len(raw_data),
-        )
-        return topics
-
-    def _generate_angle(self, keyword: str, volume: int) -> str:
-        if volume >= _HIGH_VOLUME_THRESHOLD:
-            return f"Breaking: Why '{keyword}' is dominating search right now"
-        if volume >= self._growth_threshold:
-            return f"Emerging trend: What you need to know about '{keyword}'"
-        return f"Deep-dive: Exploring the growing interest in '{keyword}'"
+        Strategy: write to ``<target>.tmp``, then ``replace()`` into place.
+        A crash mid-write never leaves a corrupt or truncated JSON file.
+        """
+        tmp = target.with_suffix(".tmp")
+        try:
+            serialised = json.dumps(payload, indent=2, cls=_ISODateTimeEncoder)
+            tmp.write_text(serialised, encoding="utf-8")
+            tmp.replace(target)
+            logger.debug("Written %d bytes  → %s", len(serialised), target)
+        except (OSError, TypeError, ValueError) as exc:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise StorageError(path=str(target), reason=str(exc)) from exc
