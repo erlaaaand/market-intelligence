@@ -238,6 +238,8 @@ class OllamaLLMAdapter(LLMPort):
             "options": {
                 "temperature": 0.1,
                 "num_predict": 3072,
+                "repeat_penalty": 1.05,
+                "num_ctx": 8192,
             },
         }
 
