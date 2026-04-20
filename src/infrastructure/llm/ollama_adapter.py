@@ -22,10 +22,25 @@ logger = logging.getLogger(__name__)
 
 _MAX_SEARCH_WORKERS: Final[int] = 5
 _SEARCH_RESULTS_PER_KW: Final[int] = 3
-
-# Proses max N keyword per panggilan Ollama agar JSON tidak truncated.
-# qwen2.5:7b: gunakan 2-3. Model lebih besar (30b) bisa 5.
 _DEFAULT_CHUNK_SIZE: Final[int] = 3
+
+# Region code → bahasa query yang lebih natural untuk DDGs
+_REGION_LANG: Final[dict[str, str]] = {
+    "ID": "Indonesia",
+    "US": "latest news",
+    "GB": "UK latest",
+    "SG": "Singapore latest",
+    "MY": "Malaysia terbaru",
+}
+
+
+def _build_search_query(keyword: str, region: str) -> str:
+    """
+    Bangun query DDGs yang natural — tanpa suffix angka tahun agar lebih mudah di-index.
+    Contoh: 'jepang Indonesia terbaru' bukan 'jepang terbaru ID 2026'
+    """
+    lang_hint = _REGION_LANG.get(region.upper(), "latest")
+    return f"{keyword} {lang_hint}"
 
 
 class OllamaLLMAdapter(LLMPort):
@@ -55,23 +70,17 @@ class OllamaLLMAdapter(LLMPort):
         region: str,
         analysis_date: str,
     ) -> MarketAnalysisReport:
-        # ── Step 1: RAG — fetch snippets untuk SEMUA keyword sekaligus ─
-        # Key di snippets_map = record.keyword (BUKAN query string dengan suffix region)
-        # Ini fix untuk bug key-mismatch sebelumnya.
+        # ── Step 1: RAG — fetch snippets untuk SEMUA keyword ────────────
         snippets_map: dict[str, list[dict[str, str]]] = {}
         if self._web_searcher is not None:
             snippets_map = self._fetch_snippets_parallel(raw_data, region)
-            logger.info(
-                "RAG summary: %d/%d keyword(s) berhasil dapat konteks web.",
-                len(snippets_map),
-                len(raw_data),
-            )
-            # Log keyword mana yang TIDAK dapat snippet (untuk debug)
+            found = len(snippets_map)
+            total = len(raw_data)
+            logger.info("RAG: %d/%d keyword mendapat konteks web.", found, total)
             missing = [r.keyword for r in raw_data if r.keyword not in snippets_map]
             if missing:
-                logger.warning(
-                    "Keyword TANPA konteks web (akan mengandalkan pengetahuan model): %s",
-                    missing,
+                logger.info(
+                    "Keyword tanpa konteks web (pakai pengetahuan model): %s", missing
                 )
 
         # ── Step 2: Pecah ke chunks ───────────────────────────────────
@@ -80,7 +89,7 @@ class OllamaLLMAdapter(LLMPort):
             for i in range(0, len(raw_data), self._chunk_size)
         ]
         logger.info(
-            "Chunked processing: %d keyword → %d chunk(s) × max %d  [region='%s']",
+            "Processing %d keyword dalam %d chunk(s) × max %d  [region='%s']",
             len(raw_data), len(chunks), self._chunk_size, region,
         )
 
@@ -88,11 +97,6 @@ class OllamaLLMAdapter(LLMPort):
         url = f"{self._base_url}{self._CHAT_PATH}"
 
         for chunk_idx, chunk in enumerate(chunks, start=1):
-            chunk_keywords = [r.keyword for r in chunk]
-
-            # ── KRITIS: ambil snippets dari map menggunakan keyword ASLI ─
-            # Ini yang sebelumnya bug: query ke DDGs pakai "keyword + region"
-            # tapi lookup ke map juga harus pakai keyword asli (bukan query string).
             chunk_snippets: dict[str, list[dict[str, str]]] = {
                 r.keyword: snippets_map[r.keyword]
                 for r in chunk
@@ -100,9 +104,9 @@ class OllamaLLMAdapter(LLMPort):
             }
 
             logger.info(
-                "Chunk %d/%d  keywords=%s  snippets_available=%d/%d",
+                "Chunk %d/%d  keywords=%s  konteks=%d/%d",
                 chunk_idx, len(chunks),
-                chunk_keywords,
+                [r.keyword for r in chunk],
                 len(chunk_snippets),
                 len(chunk),
             )
@@ -114,18 +118,12 @@ class OllamaLLMAdapter(LLMPort):
                 snippets_map=chunk_snippets,
             )
 
-            # Log ukuran prompt agar bisa detect jika terlalu besar
-            logger.info(
-                "Prompt chunk %d ukuran: %d karakter",
-                chunk_idx, len(user_msg),
-            )
-
             batch = self._call_with_retry(
                 url, user_msg, region, analysis_date, chunk_idx
             )
             all_documents.extend(batch.documents)
             logger.info(
-                "Chunk %d/%d selesai  documents_this_chunk=%d  total_so_far=%d",
+                "Chunk %d/%d selesai  docs_chunk=%d  total=%d",
                 chunk_idx, len(chunks),
                 len(batch.documents),
                 len(all_documents),
@@ -188,25 +186,16 @@ class OllamaLLMAdapter(LLMPort):
     ) -> dict[str, list[dict[str, str]]]:
         """
         Jalankan web search untuk setiap keyword secara paralel.
-
-        PENTING: key di dict hasil = record.keyword (string ASLI),
-        bukan query string yang dikirim ke DDGs.
-        Query ke DDGs boleh punya konteks tambahan (+ region),
-        tapi key penyimpanan HARUS pakai keyword asli agar lookup di chunk benar.
+        Key = record.keyword (string ASLI), bukan query string DDGs.
         """
         snippets_map: dict[str, list[dict[str, str]]] = {}
 
         def _search_one(record: RawTrendData) -> tuple[str, list[dict[str, str]]]:
-            # Query lebih spesifik dengan tambahan region & "terbaru"
-            query = f"{record.keyword} terbaru {region} 2026"
-            logger.info(
-                "Memulai web search  keyword='%s'  query='%s'",
-                record.keyword, query,
-            )
+            query = _build_search_query(record.keyword, region)
+            logger.info("Web search  keyword='%s'  query='%s'", record.keyword, query)
             results = self._web_searcher.search(  # type: ignore[union-attr]
                 query, max_results=_SEARCH_RESULTS_PER_KW
             )
-            # Return dengan keyword ASLI sebagai key (bukan query)
             return record.keyword, results
 
         workers = min(_MAX_SEARCH_WORKERS, len(raw_data))
@@ -222,16 +211,14 @@ class OllamaLLMAdapter(LLMPort):
                 try:
                     kw, snippets = future.result()
                     if snippets:
-                        # kw di sini sudah record.keyword (bukan query)
                         snippets_map[kw] = snippets
                     else:
-                        logger.warning(
-                            "Keyword '%s' tidak mendapat snippet apapun dari web search.",
-                            original_keyword,
+                        logger.info(
+                            "Tidak ada snippet untuk keyword='%s'.", original_keyword
                         )
                 except Exception as exc:
                     logger.warning(
-                        "Web search thread gagal untuk keyword='%s': %s",
+                        "Web search gagal untuk keyword='%s': %s",
                         original_keyword, exc,
                     )
 
@@ -250,7 +237,6 @@ class OllamaLLMAdapter(LLMPort):
             "format": "json",
             "options": {
                 "temperature": 0.1,
-                # 3072 cukup untuk 3 dokumen lengkap (~600 token/dok × 3 + buffer)
                 "num_predict": 3072,
             },
         }
@@ -303,7 +289,7 @@ class OllamaLLMAdapter(LLMPort):
                 model=self._model,
                 reason=(
                     f"Ollama timeout setelah {self._timeout}s. "
-                    "Coba naikkan OLLAMA_TIMEOUT di .env."
+                    "Naikkan OLLAMA_TIMEOUT di .env."
                 ),
             ) from None
         except httpx.HTTPError:

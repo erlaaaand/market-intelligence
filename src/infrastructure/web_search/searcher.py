@@ -27,16 +27,65 @@ def _import_ddgs():
         )
 
 
+def _call_news(ddgs_instance, query: str, region: str, safesearch: str, max_results: int) -> list:
+    """
+    Wrapper aman untuk ddgs.news() yang menangani perbedaan API antar versi.
+
+    - ddgs >= 7.x  : news(query, region=..., safesearch=..., max_results=...)
+    - duckduckgo_search lama : news(keywords=query, ...)
+    """
+    # Coba API baru (positional query) terlebih dahulu
+    try:
+        return list(ddgs_instance.news(query, region=region, safesearch=safesearch, max_results=max_results))
+    except TypeError:
+        pass
+
+    # Fallback ke API lama (keywords=)
+    try:
+        return list(ddgs_instance.news(keywords=query, region=region, safesearch=safesearch, max_results=max_results))
+    except TypeError:
+        pass
+
+    # Fallback minimal tanpa parameter opsional
+    return list(ddgs_instance.news(query))
+
+
+def _call_text(ddgs_instance, query: str, region: str, safesearch: str, max_results: int) -> list:
+    """
+    Wrapper aman untuk ddgs.text() yang menangani perbedaan API antar versi.
+    """
+    try:
+        return list(ddgs_instance.text(query, region=region, safesearch=safesearch, max_results=max_results))
+    except TypeError:
+        pass
+
+    try:
+        return list(ddgs_instance.text(keywords=query, region=region, safesearch=safesearch, max_results=max_results))
+    except TypeError:
+        pass
+
+    return list(ddgs_instance.text(query))
+
+
 class DuckDuckGoSearchAdapter(WebSearchPort):
     """
     Fetch real-time news snippets dari DuckDuckGo.
     Selalu mengembalikan list (tidak pernah raise) agar pipeline tidak crash.
-    Gunakan: pip install ddgs
+    Kompatibel dengan ddgs >= 7.x dan duckduckgo_search versi lama.
+
+    Install: pip install -U ddgs
     """
 
     def __init__(self, region: str = "wt-wt", safesearch: str = "moderate") -> None:
         self._region = region
         self._safesearch = safesearch
+        self._ddgs_cls = None
+        self._api_version: str | None = None  # "new" | "old" | None
+
+    def _get_ddgs_cls(self):
+        if self._ddgs_cls is None:
+            self._ddgs_cls = _import_ddgs()
+        return self._ddgs_cls
 
     def search(self, query: str, max_results: int = _DEFAULT_MAX_RESULTS) -> list[dict[str, str]]:
         """
@@ -44,7 +93,7 @@ class DuckDuckGoSearchAdapter(WebSearchPort):
         Key yang dikembalikan: 'title', 'body', 'url'.
         """
         try:
-            DDGS = _import_ddgs()
+            DDGS = self._get_ddgs_cls()
         except ImportError as e:
             logger.warning("Web search dinonaktifkan: %s", e)
             return []
@@ -55,20 +104,16 @@ class DuckDuckGoSearchAdapter(WebSearchPort):
         try:
             logger.info("DDGs NEWS search dimulai  query='%s'  max=%d", query, max_results)
             with DDGS() as ddgs:
-                hits = list(ddgs.news(
-                    keywords=query,
-                    region=self._region,
-                    safesearch=self._safesearch,
-                    max_results=max_results,
-                ))
+                hits = _call_news(ddgs, query, self._region, self._safesearch, max_results)
+
             for hit in hits:
                 results.append({
                     "title": str(hit.get("title", "")).strip(),
                     "body":  str(hit.get("body",  "")).strip(),
                     "url":   str(hit.get("url",   "")).strip(),
                 })
+
             if results:
-                # Log preview snippet pertama agar bisa di-verify di terminal
                 preview = results[0]
                 logger.info(
                     "DDGs NEWS OK  query='%s'  hits=%d  preview='%s...'",
@@ -90,18 +135,15 @@ class DuckDuckGoSearchAdapter(WebSearchPort):
             try:
                 logger.info("DDGs TEXT search dimulai  query='%s'  max=%d", query, max_results)
                 with DDGS() as ddgs:
-                    hits = list(ddgs.text(
-                        keywords=query,
-                        region=self._region,
-                        safesearch=self._safesearch,
-                        max_results=max_results,
-                    ))
+                    hits = _call_text(ddgs, query, self._region, self._safesearch, max_results)
+
                 for hit in hits:
                     results.append({
                         "title": str(hit.get("title", "")).strip(),
                         "body":  str(hit.get("body",  "")).strip(),
                         "url":   str(hit.get("url",   "")).strip(),
                     })
+
                 if results:
                     preview = results[0]
                     logger.info(
