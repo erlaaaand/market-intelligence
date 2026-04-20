@@ -27,10 +27,23 @@ class TrendAnalyzerUseCase:
         self._trend_provider = trend_provider
         self._storage = storage
         self._llm = llm
-        self._top_n = top_n
+        self._default_top_n = top_n
 
-    def execute(self, region: str) -> CreativeDocumentBatch:
+    def execute(self, region: str, top_n: int | None = None) -> CreativeDocumentBatch:
+        """
+        Jalankan pipeline lengkap untuk satu region.
+
+        Args:
+            region: Kode ISO 3166-1 alpha-2 (e.g. 'ID', 'US').
+            top_n:  Override jumlah topik yang dikirim ke LLM.
+                    Jika None, pakai self._default_top_n dari config.
+        """
         region = region.upper().strip()
+        effective_top_n = top_n if top_n is not None else self._default_top_n
+
+        if effective_top_n < 1:
+            raise ValueError(f"top_n must be >= 1, got {effective_top_n}")
+
         now: datetime = datetime.now(tz=timezone.utc)
         analysis_date: str = now.strftime("%Y-%m-%d")
         ts_str: str = now.strftime("%H%M%SZ")
@@ -38,7 +51,7 @@ class TrendAnalyzerUseCase:
         logger.info(
             "Pipeline start  region='%s'  top_n=%d  date=%s",
             region,
-            self._top_n,
+            effective_top_n,
             analysis_date,
         )
 
@@ -48,13 +61,14 @@ class TrendAnalyzerUseCase:
         self._save_raw(raw_data, raw_filename)
 
         top_raw = sorted(raw_data, key=lambda r: r.raw_value, reverse=True)[
-            : self._top_n
+            :effective_top_n
         ]
         logger.info(
-            "Forwarding %d/%d raw record(s) to LLM for region='%s'.",
+            "Forwarding %d/%d raw record(s) to LLM for region='%s'  (top_n=%d).",
             len(top_raw),
             len(raw_data),
             region,
+            effective_top_n,
         )
 
         batch = self._analyze_with_llm(top_raw, region, analysis_date)
@@ -86,7 +100,7 @@ class TrendAnalyzerUseCase:
             )
             return raw_data
         except DataExtractionError as exc:
-            logger.error("Trend provider failed for region='%s': %s", region, exc.message)
+            logger.error("Trend provider gagal untuk region='%s': %s", region, exc.message)
             raise
 
     def _save_raw(self, raw_data: list[RawTrendData], filename: str) -> None:
@@ -95,7 +109,7 @@ class TrendAnalyzerUseCase:
             "records": [item.model_dump(mode="json") for item in raw_data],
         }
         self._storage.save_raw(payload, filename)
-        logger.info("Raw data persisted  → '%s'  (%d record(s)).", filename, len(raw_data))
+        logger.info("Raw data disimpan  → '%s'  (%d record(s)).", filename, len(raw_data))
 
     def _analyze_with_llm(
         self,
@@ -105,7 +119,7 @@ class TrendAnalyzerUseCase:
     ) -> CreativeDocumentBatch:
         if not raw_data:
             logger.warning(
-                "No raw data available for region='%s'. Returning empty batch.",
+                "Tidak ada data untuk region='%s'. Mengembalikan batch kosong.",
                 region,
             )
             return CreativeDocumentBatch(region=region, date=analysis_date)
@@ -117,11 +131,11 @@ class TrendAnalyzerUseCase:
                 analysis_date=analysis_date,
             )
             logger.info(
-                "LLM analysis complete  region='%s'  documents=%d.",
+                "LLM analysis selesai  region='%s'  documents=%d.",
                 region,
                 len(batch.documents),
             )
             return batch
         except LLMAnalysisError as exc:
-            logger.error("LLM analysis failed for region='%s': %s", region, exc.message)
+            logger.error("LLM analysis gagal untuk region='%s': %s", region, exc.message)
             raise

@@ -30,3 +30,10 @@ class StoragePort(ABC):
     @abstractmethod
     def save_processed(self, batch: CreativeDocumentBatch, filename: str) -> None:
         ...
+
+
+class WebSearchPort(ABC):
+
+    @abstractmethod
+    def search(self, query: str, max_results: int = 3) -> list[dict[str, str]]:
+        ...

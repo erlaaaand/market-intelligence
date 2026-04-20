@@ -11,25 +11,24 @@ from src.infrastructure.google_trends_api import GoogleTrendsAdapter
 from src.infrastructure.llm_adapter import MockLLMAdapter, OllamaLLMAdapter
 from src.infrastructure.local_storage import LocalStorageAdapter
 from src.infrastructure.youtube_scraper import YouTubeScraperAdapter
+from src.infrastructure.web_search import DuckDuckGoSearchAdapter
 from src.interfaces.cli import run_cli
 
 
 def _configure_logging(level: str) -> None:
-    # 1. Matikan log spam dari HTTPX dan HTTPCore agar terminal bersih
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-    # 2. Gunakan RichHandler sebagai ganti StreamHandler biasa
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
         format="%(message)s",
         datefmt="[%X]",
         handlers=[
             RichHandler(
-                rich_tracebacks=False, # Sama fungsinya dengan _NoTracebackFormatter Anda sebelumnya
+                rich_tracebacks=False,
                 markup=True,
                 show_path=False,
-                omit_repeated_times=False
+                omit_repeated_times=False,
             )
         ],
         force=True,
@@ -38,17 +37,19 @@ def _configure_logging(level: str) -> None:
 
 def main() -> None:
     settings = get_settings()
-
     _configure_logging(settings.LOG_LEVEL)
     logger = logging.getLogger(__name__)
-    
-    # Menambahkan tag warna markup untuk output yang lebih elegan
+
     logger.info(
         "agent_market_intelligence starting  "
-        "trend_provider=[cyan]'%s'[/cyan]  llm_provider=[magenta]'%s'[/magenta]  region=[yellow]'%s'[/yellow]",
+        "trend_provider=[cyan]'%s'[/cyan]  "
+        "llm_provider=[magenta]'%s'[/magenta]  "
+        "region=[yellow]'%s'[/yellow]  "
+        "default_top_n=[green]%d[/green]",
         settings.TREND_PROVIDER,
         settings.LLM_PROVIDER,
         settings.TARGET_REGION,
+        settings.LLM_TOP_N,
     )
 
     storage_adapter = LocalStorageAdapter(
@@ -56,6 +57,7 @@ def main() -> None:
         processed_base_path=settings.PROCESSED_DATA_PATH,
     )
 
+    # ── Trend provider ────────────────────────────────────────────────
     if settings.TREND_PROVIDER == "youtube":
         trend_adapter: GoogleTrendsAdapter | YouTubeScraperAdapter = (
             YouTubeScraperAdapter()
@@ -70,25 +72,31 @@ def main() -> None:
         )
         logger.info("Trend provider: GoogleTrendsAdapter (3-tier fallback)")
 
+    # ── LLM adapter ───────────────────────────────────────────────────
     if settings.LLM_PROVIDER == "ollama":
+        web_searcher = DuckDuckGoSearchAdapter(region="wt-wt")
+        logger.info("RAG: DuckDuckGoSearchAdapter aktif (real-time grounding).")
+
         llm_adapter: OllamaLLMAdapter | MockLLMAdapter = OllamaLLMAdapter(
             base_url=settings.OLLAMA_BASE_URL,
             model=settings.OLLAMA_MODEL,
             timeout=settings.OLLAMA_TIMEOUT,
             retries=settings.OLLAMA_RETRIES,
+            web_searcher=web_searcher,
+            chunk_size=3,   # 3 keyword/call — aman untuk model 7b
         )
         logger.info(
-            "LLM adapter: OllamaLLMAdapter  url='%s'  model='%s'",
+            "LLM adapter: OllamaLLMAdapter  url='%s'  model='%s'  chunk_size=3",
             settings.OLLAMA_BASE_URL,
             settings.OLLAMA_MODEL,
         )
     else:
         llm_adapter = MockLLMAdapter()
         logger.info(
-            "LLM adapter: MockLLMAdapter (offline mode — set LLM_PROVIDER=ollama "
-            "in .env to use a real model)"
+            "LLM adapter: MockLLMAdapter (offline — set LLM_PROVIDER=ollama untuk model nyata)"
         )
 
+    # top_n di use_case = default fallback jika CLI tidak override
     use_case = TrendAnalyzerUseCase(
         trend_provider=trend_adapter,
         storage=storage_adapter,
@@ -96,7 +104,11 @@ def main() -> None:
         top_n=settings.LLM_TOP_N,
     )
 
-    run_cli(use_case=use_case, default_region=settings.TARGET_REGION)
+    run_cli(
+        use_case=use_case,
+        default_region=settings.TARGET_REGION,
+        default_top_n=settings.LLM_TOP_N,   # ← diteruskan ke CLI untuk prompt default
+    )
 
 
 if __name__ == "__main__":
