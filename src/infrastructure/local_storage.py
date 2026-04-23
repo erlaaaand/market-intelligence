@@ -38,7 +38,7 @@ class LocalStorageAdapter(StoragePort):
     def save_processed(
         self, batch: CreativeDocumentBatch, filename: str
     ) -> None:
-        target_dir = self._processed_path
+        target_dir = self._processed_path / batch.region / batch.date
 
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -84,7 +84,7 @@ class LocalStorageAdapter(StoragePort):
             serialised = json.dumps(payload, indent=2, cls=_ISODateTimeEncoder)
             tmp.write_text(serialised, encoding="utf-8")
             tmp.replace(target)
-            logger.debug("Written %d bytes  → %s", len(serialised), target)
+            logger.debug("Written %d bytes  → %s", target)
         except (OSError, TypeError, ValueError) as exc:
             try:
                 tmp.unlink(missing_ok=True)
